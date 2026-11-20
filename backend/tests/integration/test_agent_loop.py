@@ -7,12 +7,13 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
+from pydantic import JsonValue
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.contracts import FakeProvider, ModelEvent, ModelEventType, ProviderMessage, ToolDefinition
 from app.agent.loop import execute_run
-from app.models import ModelCall, Order, Refund, Run
+from app.models import Message, ModelCall, Order, Refund, Run, RunEventRecord
 from app.runs.schemas import EventType, RunSnapshot
 from app.runs.service import create_run, get_snapshot
 from app.tools import ToolRegistry
@@ -266,3 +267,49 @@ async def test_timeout_preserves_partial_text(sessions: Sessions, limits: dict[s
     assert trace.events[-1].payload["code"] == code
     assert trace.active_elapsed_ms >= 990
     assert trace.messages[-1].text == "Partial"
+
+
+async def test_many_small_deltas_preserve_text_with_fewer_events(sessions: Sessions) -> None:
+    run_id = await claimed(sessions)
+    fragments = [ModelEvent(ModelEventType.text_delta, text=str(i % 10)) for i in range(200)]
+    await execute_run(sessions, run_id, FakeProvider([[*fragments, END]]))
+    trace = await snapshot(sessions, run_id)
+    batches = [e.payload["delta"] for e in trace.events if e.type == EventType.message_delta]
+    expected = "".join(e.text for e in fragments)
+    assert batches[0] == "0" and 2 <= len(batches) < len(fragments) // 2
+    assert "".join(str(batch) for batch in batches) == trace.messages[-1].text == expected
+    assert trace.status == "completed"
+
+
+@pytest.mark.parametrize("broken_event", [EventType.message_delta, EventType.tool_completed])
+async def test_storage_failure_hands_off_unfinished_work_to_recovery(
+    sessions: Sessions, monkeypatch: pytest.MonkeyPatch, broken_event: EventType
+) -> None:
+    from app.agent import loop
+    from app.agent.worker import recover
+
+    run_id = await claimed(sessions)
+    append = loop.append_event
+
+    async def fail_once(
+        session: AsyncSession, run_id: UUID, kind: EventType, payload: dict[str, JsonValue]
+    ) -> RunEventRecord:
+        if kind == broken_event:
+            raise RuntimeError("simulated trace write failure")
+        return await append(session, run_id, kind, payload)
+
+    monkeypatch.setattr(loop, "append_event", fail_once)
+    fake = FakeProvider([[call("a", "date_math", operation="previous_month"), ANSWER, END]])
+    with pytest.raises(RuntimeError, match="trace write failure"):
+        await execute_run(sessions, run_id, fake)
+    assert (await snapshot(sessions, run_id)).status == "running"
+
+    await recover(sessions)
+    trace = await snapshot(sessions, run_id)
+    assert trace.events[-1].type == EventType.run_failed
+    assert trace.messages[1].tool_calls[0].status == "failed"
+    assert json.loads(trace.messages[-1].text or "")["error"]["code"] == "PROCESS_RESTARTED"
+    async with sessions() as session:
+        attempt = (await session.scalars(select(ModelCall))).one()
+        assert attempt.status != "running" and attempt.completed_at is not None
+        assert not await session.scalar(select(Message.id).where(Message.status == "running"))
