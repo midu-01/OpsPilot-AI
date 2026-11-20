@@ -25,6 +25,17 @@ The backend applies Alembic migrations and seeds 30 synthetic orders before acce
 
 For the PostgreSQL integration tests, set `TEST_DATABASE_URL` to an accessible `postgresql+asyncpg://` URL for a test role with database creation permission. Each test creates, migrates and removes its own database. Run `uv run pytest tests/integration` from `backend/`.
 
+## Backend tools
+
+The internal catalog in `app.tools.registry` exposes four typed tools. Read calls return structured results. A direct refund call returns `APPROVAL_REQUIRED`.
+
+| Tool | Behavior |
+| --- | --- |
+| `date_math` | Computes calendar ranges in the run's business timezone. Its previous-month result supplies inclusive and exclusive shipment timestamps for `query_orders`. |
+| `query_orders` | Filters and paginates synthetic orders. For orders over $500, pass `min_amount_minor: 50000`. |
+| `search_policies` | Returns ranked matches with each policy's ID, version, source filename and excerpt. |
+| `issue_refund` | Requires human approval. A separate read-only preview uses shipment and ledger evidence to calculate the proposed amount in cents. Approval decisions and ledger execution belong to Phase 5. |
+
 ## Run and event contracts
 
 The Pydantic models in `backend/app/runs/schemas.py` describe run creation, states, approval decisions, snapshots and the event stream. Each event has a version, run ID, strictly positive per-run sequence number, event type, timestamp and payload. The snapshot cursor records the last represented sequence number (zero for an empty trace). A subscriber requests events after that cursor. The provider interface in `backend/app/agent/contracts.py` defines the streaming boundary for real and scripted model providers.
