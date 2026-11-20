@@ -17,7 +17,9 @@ from pydantic import (
 )
 
 type Goal = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
-type Reason = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+type Reason = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000, pattern=r"^[^\x00]*$")
+]
 
 
 class RunStatus(StrEnum):
