@@ -117,7 +117,7 @@ class RunSummary(BaseModel):
     status: RunStatus
     step_count: NonNegativeInt = 0
     total_tokens: NonNegativeInt = 0
-    estimated_cost_usd: str | None = None
+    estimated_cost_usd: str | None = Field(default=None, coerce_numbers_to_str=True)
     duration_ms: NonNegativeInt | None = None
     created_at: AwareDatetime
     updated_at: AwareDatetime
@@ -162,7 +162,7 @@ class RunSnapshot(BaseModel):
     step_count: NonNegativeInt = 0
     tool_call_count: NonNegativeInt = 0
     total_tokens: NonNegativeInt = 0
-    estimated_cost_usd: str | None = None
+    estimated_cost_usd: str | None = Field(default=None, coerce_numbers_to_str=True)
     active_elapsed_ms: NonNegativeInt = 0
     max_agent_steps: PositiveInt
     max_tool_calls: PositiveInt

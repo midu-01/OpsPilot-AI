@@ -30,3 +30,6 @@ __pycache__/
 .pnpm-store/
 .code-review-graph/
 .coverage
+
+# Planning docs (local only)
+docs/superpowers/
