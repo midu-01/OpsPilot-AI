@@ -1,6 +1,6 @@
 # OpsPilot AI
 
-OpsPilot is a local operations workspace. The first phase provides the Next.js console shell, a FastAPI service, a PostgreSQL database and the contracts for future agent runs.
+OpsPilot is a local operations workspace. The Next.js console connects to a FastAPI service backed by PostgreSQL. The API stores queued runs and their event history.
 
 ## Start locally
 
@@ -16,6 +16,14 @@ Open [the console](http://localhost:3000) and check that **Backend & database** 
 On a Mac using Colima, start the engine with `colima start` before running Compose. Local defaults work without an API key or an environment file. To customize the local database password, copy `.env.example` to `.env` before initializing the volume. Use a URL-safe value. Keep the same password while reusing that volume.
 
 Use `docker compose logs backend` to inspect API startup and `docker compose down` to stop the workspace while keeping the named database volume. The browser and API ports bind to loopback. PostgreSQL is accessible inside the Compose network.
+
+## Database and demo data
+
+The backend applies Alembic migrations and seeds 30 synthetic orders before accepting requests. The first startup records a UTC reference date for the demo. Later starts preserve that date, existing orders, refunds and runs. The backend startup log prints a sample goal with the matching shipment dates. The eight fictional policy documents ship in `backend/policies/`.
+
+`POST /runs` creates a queued run. `GET /runs/{id}` returns its messages, events and replay cursor, including after a backend restart. `GET /runs` returns paginated history. The [local API documentation](http://localhost:8000/docs) lets you exercise these endpoints.
+
+For the PostgreSQL integration tests, set `TEST_DATABASE_URL` to an accessible `postgresql+asyncpg://` URL for a test role with database creation permission. Each test creates, migrates and removes its own database. Run `uv run pytest tests/integration` from `backend/`.
 
 ## Run and event contracts
 
