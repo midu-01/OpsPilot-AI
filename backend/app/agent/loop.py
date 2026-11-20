@@ -3,7 +3,8 @@
 import asyncio
 import json
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +24,8 @@ from app.tools.registry import get_registry
 
 type Sessions = async_sessionmaker[AsyncSession]
 logger = logging.getLogger(__name__)
+DELTA_FLUSH_SECONDS = 0.1
+MAX_DELTA_CHARS = 4096
 
 
 class RunFailure(Exception):
@@ -113,23 +116,82 @@ class Execution:
             )
         self.next_index += 1
 
-    async def receive(self, turn: Turn) -> None:
+    async def read_event(self, stream: AsyncIterator[ModelEvent], deadline: float) -> ModelEvent:
+        loop = asyncio.get_running_loop()
+        try:
+            if loop.time() >= deadline:
+                raise TimeoutError
+            async with asyncio.timeout_at(deadline):
+                return await anext(stream)
+        except StopAsyncIteration as exc:
+            raise RunFailure("MODEL_ERROR", "The provider stream ended before completing the turn.") from exc
+        except TimeoutError as exc:
+            if loop.time() >= self.deadline:
+                raise active_limit() from exc
+            raise RunFailure("MODEL_TIMEOUT", "The model turn timed out.") from exc
+        except Exception as exc:
+            raise RunFailure("MODEL_ERROR", "The model turn could not be completed.") from exc
+
+    async def model_events(self) -> AsyncGenerator[ModelEvent]:
+        """Coalesce text between provider events, including while a subsequent read is stalled."""
         loop = asyncio.get_running_loop()
         deadline = min(self.deadline, loop.time() + self.run.model_timeout_seconds)
-        stream = self.provider.stream_turn(self.history, self.registry.definitions())
+        definitions = self.registry.definitions()
+        try:
+            stream = self.provider.stream_turn(self.history, definitions)
+        except Exception as exc:
+            raise RunFailure("MODEL_ERROR", "The model turn could not be started.") from exc
+
+        first = True
+        buffer = ""
+        flush_at = 0.0
+        pending: asyncio.Task[ModelEvent] | None = None
         try:
             while True:
+                if pending is None:
+                    pending = asyncio.create_task(self.read_event(stream, deadline))
+                if buffer:
+                    done, _ = await asyncio.wait([pending], timeout=max(0, flush_at - loop.time()))
+                    if not done:
+                        yield ModelEvent(ModelEventType.text_delta, text=buffer)
+                        buffer = ""
+                        continue
                 try:
-                    if loop.time() >= deadline:
-                        raise TimeoutError
-                    async with asyncio.timeout_at(deadline):
-                        event = await anext(stream)
-                except StopAsyncIteration as exc:
-                    raise RunFailure("MODEL_ERROR", "The provider stream ended before completing the turn.") from exc
-                except TimeoutError as exc:
-                    if loop.time() >= self.deadline:
-                        raise active_limit() from exc
-                    raise RunFailure("MODEL_TIMEOUT", "The model turn timed out.") from exc
+                    event = await pending
+                except RunFailure:
+                    if buffer:
+                        yield ModelEvent(ModelEventType.text_delta, text=buffer)
+                    raise
+                pending = None
+                if event.type != ModelEventType.text_delta:
+                    if buffer:
+                        yield ModelEvent(ModelEventType.text_delta, text=buffer)
+                        buffer = ""
+                    yield event
+                    if event.type in (ModelEventType.turn_complete, ModelEventType.error):
+                        return
+                    continue
+                offset = 0
+                while offset < len(event.text):
+                    if not buffer:
+                        flush_at = loop.time() + DELTA_FLUSH_SECONDS
+                    piece = event.text[offset : offset + MAX_DELTA_CHARS - len(buffer)]
+                    buffer += piece
+                    offset += len(piece)
+                    if first or len(buffer) == MAX_DELTA_CHARS or loop.time() >= flush_at:
+                        yield ModelEvent(ModelEventType.text_delta, text=buffer)
+                        first = False
+                        buffer = ""
+        finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+            if isinstance(stream, AsyncGenerator):
+                await stream.aclose()
+
+    async def receive(self, turn: Turn) -> None:
+        async with aclosing(self.model_events()) as events:
+            async for event in events:
                 if event.type == ModelEventType.turn_complete:
                     turn.assistant.response_items = event.response_items
                     if not turn.requests and not (turn.assistant.content or "").strip():
@@ -139,22 +201,21 @@ class Execution:
                     raise RunFailure("MODEL_ERROR", event.error_message or "The provider reported a model error.")
                 if event.type == ModelEventType.usage:
                     turn.usage = event
-                if event.type == ModelEventType.text_delta and event.text:
+                if event.type == ModelEventType.text_delta:
                     turn.assistant.content = (turn.assistant.content or "") + event.text
                     async with self.sessions.begin() as session:
+                        run = await session.get_one(Run, self.run.id, with_for_update=True)
+                        self.checkpoint(run)
                         message = await session.get_one(Message, turn.message_id)
                         message.text = turn.assistant.content
                         await append_event(
                             session,
-                            self.run.id,
+                            run.id,
                             EventType.message_delta,
                             {"message_id": str(message.id), "delta": event.text},
                         )
                 if event.type == ModelEventType.tool_call:
                     await self.request_tool(turn, event)
-        finally:
-            if isinstance(stream, AsyncGenerator):
-                await stream.aclose()
 
     async def request_tool(self, turn: Turn, event: ModelEvent) -> None:
         if not event.call_id or not event.tool_name or event.call_id in self.call_ids:
@@ -206,6 +267,8 @@ class Execution:
                     "model_call_id": str(model.id),
                     "usage_complete": model.usage_complete,
                     "total_tokens": run.total_tokens,
+                    "token_usage_complete": run.token_usage_complete,
+                    "cost_is_upper_bound": run.cost_is_upper_bound,
                     "estimated_cost_usd": str(run.estimated_cost_usd) if run.estimated_cost_usd is not None else None,
                 },
             )
@@ -259,8 +322,6 @@ class Execution:
             await self.receive(turn)
         except RunFailure as exc:
             failure = exc
-        except Exception:
-            failure = RunFailure("MODEL_ERROR", "The model turn could not be completed.")
         failure = await self.finish_turn(turn, failure)
         for call_id, event in turn.requests:
             result: ToolResult
@@ -334,7 +395,4 @@ async def execute_run(sessions: Sessions, run_id: UUID, provider: LLMProvider, p
             pass
     except RunFailure as exc:
         failure = exc
-    except Exception:
-        logger.error("Run execution failed", extra={"run_id": str(run_id)})
-        failure = RunFailure("RUN_ERROR", "The run could not be completed.")
     await execution.finish(failure)
