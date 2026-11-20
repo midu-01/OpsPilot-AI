@@ -21,8 +21,6 @@ Use `docker compose logs backend` to inspect API startup and `docker compose dow
 
 The Pydantic models in `backend/app/runs/schemas.py` describe run creation, states, approval decisions, snapshots and the event stream. Each event has a version, run ID, strictly positive per-run sequence number, event type, timestamp and payload. The snapshot cursor records the last represented sequence number (zero for an empty trace). A subscriber requests events after that cursor. The provider interface in `backend/app/agent/contracts.py` defines the streaming boundary for real and scripted model providers.
 
-The [implementation plan](docs/superpowers/plans/2026-11-19-opspilot-ai-implementation.md) lists the phase boundaries and verification steps.
-
 ## Verify locally
 
 Run `pnpm install --frozen-lockfile`, `pnpm lint`, and `pnpm typecheck` from `frontend/`. From `backend/`, run `uv sync --locked`, then `uv run pytest`, `uv run ruff check .`, and `uv run mypy app`. Backend unit tests use a scripted provider and do not require an OpenAI key.
