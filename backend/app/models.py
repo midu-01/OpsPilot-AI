@@ -95,6 +95,11 @@ class Run(Base):
     updated_at: Mapped[CreatedAt] = mapped_column(onupdate=func.now())
 
     @property
+    def token_usage_complete(self) -> bool | None:
+        complete = self.execution_cursor.get("token_usage_complete")
+        return complete if isinstance(complete, bool) else None
+
+    @property
     def cost_is_upper_bound(self) -> bool:
         return self.estimated_cost_usd is not None and self.execution_cursor.get("cost_upper_bound") is True
 

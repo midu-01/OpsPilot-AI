@@ -135,6 +135,7 @@ async def get_snapshot(session: AsyncSession, run_id: UUID) -> RunSnapshot | Non
             total_tokens=run.total_tokens,
             estimated_cost_usd=str(run.estimated_cost_usd) if run.estimated_cost_usd is not None else None,
             model_calls=[ModelAttemptSnapshot.model_validate(a, from_attributes=True) for a in attempts],
+            token_usage_complete=run.token_usage_complete,
             cost_is_upper_bound=run.cost_is_upper_bound,
             active_elapsed_ms=run.active_elapsed_ms,
             max_agent_steps=run.max_agent_steps,

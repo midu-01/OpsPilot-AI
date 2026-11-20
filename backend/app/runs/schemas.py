@@ -117,6 +117,7 @@ class RunSummary(BaseModel):
     status: RunStatus
     step_count: NonNegativeInt = 0
     total_tokens: NonNegativeInt = 0
+    token_usage_complete: bool | None = None
     cost_is_upper_bound: bool = False
     estimated_cost_usd: str | None = Field(default=None, coerce_numbers_to_str=True)
     duration_ms: NonNegativeInt | None = None
@@ -175,6 +176,7 @@ class RunSnapshot(BaseModel):
     step_count: NonNegativeInt = 0
     tool_call_count: NonNegativeInt = 0
     total_tokens: NonNegativeInt = 0
+    token_usage_complete: bool | None = None
     cost_is_upper_bound: bool = False
     estimated_cost_usd: str | None = Field(default=None, coerce_numbers_to_str=True)
     active_elapsed_ms: NonNegativeInt = 0
