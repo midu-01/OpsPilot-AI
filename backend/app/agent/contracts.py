@@ -35,11 +35,14 @@ class ModelEvent:
     tool_name: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
     # usage
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_tokens: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None
     # error
     error_message: str = ""
+    raw_arguments: str | None = None
+    # Responses output to replay privately on the next model turn.
+    response_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +74,7 @@ class ProviderMessage:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_call_id: str | None = None
     name: str | None = None
+    response_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

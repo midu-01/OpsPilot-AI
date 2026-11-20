@@ -9,12 +9,13 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.models import Approval, Message, Run, RunEventRecord, ToolCall
+from app.models import Approval, Message, ModelCall, Run, RunEventRecord, ToolCall
 from app.runs.schemas import (
     ApprovalSnapshot,
     ApprovalStatus,
     EventType,
     MessageSnapshot,
+    ModelAttemptSnapshot,
     PaginatedRuns,
     RunEvent,
     RunSnapshot,
@@ -48,7 +49,7 @@ async def create_run(session: AsyncSession, goal: str) -> RunSummary:
             goal=goal,
             status=RunStatus.queued.value,
             provider=settings.llm_provider,
-            model=settings.openai_model,
+            model=settings.selected_model,
             reference_time=datetime.now(UTC),
             business_timezone=settings.business_timezone,
             max_agent_steps=settings.max_agent_steps,
@@ -118,6 +119,9 @@ async def get_snapshot(session: AsyncSession, run_id: UUID) -> RunSnapshot | Non
                 select(RunEventRecord).where(RunEventRecord.run_id == run_id).order_by(RunEventRecord.sequence)
             )
         ]
+        attempts = await session.scalars(
+            select(ModelCall).where(ModelCall.run_id == run.id).order_by(ModelCall.started_at, ModelCall.id)
+        )
         return RunSnapshot(
             id=run.id,
             goal=run.goal,
@@ -130,6 +134,8 @@ async def get_snapshot(session: AsyncSession, run_id: UUID) -> RunSnapshot | Non
             tool_call_count=run.tool_call_count,
             total_tokens=run.total_tokens,
             estimated_cost_usd=str(run.estimated_cost_usd) if run.estimated_cost_usd is not None else None,
+            model_calls=[ModelAttemptSnapshot.model_validate(a, from_attributes=True) for a in attempts],
+            cost_is_upper_bound=run.cost_is_upper_bound,
             active_elapsed_ms=run.active_elapsed_ms,
             max_agent_steps=run.max_agent_steps,
             max_tool_calls=run.max_tool_calls,

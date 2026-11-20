@@ -117,6 +117,7 @@ class RunSummary(BaseModel):
     status: RunStatus
     step_count: NonNegativeInt = 0
     total_tokens: NonNegativeInt = 0
+    cost_is_upper_bound: bool = False
     estimated_cost_usd: str | None = Field(default=None, coerce_numbers_to_str=True)
     duration_ms: NonNegativeInt | None = None
     created_at: AwareDatetime
@@ -151,6 +152,18 @@ class RunEvent(BaseModel):
     payload: dict[str, JsonValue] = Field(default_factory=dict)
 
 
+class ModelAttemptSnapshot(BaseModel):
+    id: UUID
+    model: str
+    status: str
+    input_tokens: NonNegativeInt | None
+    output_tokens: NonNegativeInt | None
+    cached_tokens: NonNegativeInt | None
+    usage_complete: bool
+    pricing_snapshot: dict[str, JsonValue] | None
+    estimated_cost_usd: str | None = Field(default=None, coerce_numbers_to_str=True)
+
+
 class RunSnapshot(BaseModel):
     id: UUID
     goal: Goal
@@ -162,10 +175,12 @@ class RunSnapshot(BaseModel):
     step_count: NonNegativeInt = 0
     tool_call_count: NonNegativeInt = 0
     total_tokens: NonNegativeInt = 0
+    cost_is_upper_bound: bool = False
     estimated_cost_usd: str | None = Field(default=None, coerce_numbers_to_str=True)
     active_elapsed_ms: NonNegativeInt = 0
     max_agent_steps: PositiveInt
     max_tool_calls: PositiveInt
+    model_calls: list[ModelAttemptSnapshot] = Field(default_factory=list)
     messages: list[MessageSnapshot] = Field(default_factory=list)
     approvals: list[ApprovalSnapshot] = Field(default_factory=list, description="All approval proposals and decisions")
     events: list[RunEvent] = Field(default_factory=list, description="Public event history in sequence order")

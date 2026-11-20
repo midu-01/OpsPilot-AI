@@ -94,6 +94,10 @@ class Run(Base):
     created_at: Mapped[CreatedAt]
     updated_at: Mapped[CreatedAt] = mapped_column(onupdate=func.now())
 
+    @property
+    def cost_is_upper_bound(self) -> bool:
+        return self.estimated_cost_usd is not None and self.execution_cursor.get("cost_upper_bound") is True
+
 
 class Message(Base):
     __tablename__ = "messages"
