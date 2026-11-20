@@ -3,14 +3,15 @@
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app.agent.worker import run_worker
 from app.config import settings
-from app.db import engine
+from app.db import async_session_factory, engine
 from app.runs.routes import router as runs_router
 from app.runs.schemas import HealthResponse
 
@@ -20,10 +21,16 @@ READINESS_TIMEOUT_SECONDS = 3.0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    worker = asyncio.create_task(run_worker(engine, async_session_factory), name="opspilot-run-worker")
     try:
         yield
     finally:
-        await engine.dispose()
+        worker.cancel()
+        try:
+            with suppress(asyncio.CancelledError):
+                await worker
+        finally:
+            await engine.dispose()
 
 
 app = FastAPI(title="OpsPilot AI", description="Agent Run Console API", version="0.1.0", lifespan=lifespan)
