@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.runs import service
-from app.runs.schemas import PaginatedRuns, RunCreate, RunSnapshot, RunSummary
+from app.runs import decisions, service
+from app.runs.schemas import ApprovalAction, PaginatedRuns, RunCreate, RunSnapshot, RunSummary
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 type Session = Annotated[AsyncSession, Depends(get_session)]
@@ -34,3 +34,13 @@ async def get_run(run_id: UUID, session: Session) -> RunSnapshot:
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return snapshot
+
+
+@router.post("/{run_id}/approve")
+async def decide_approval(run_id: UUID, body: ApprovalAction, session: Session) -> RunSummary:
+    return await decisions.decide_approval(session, run_id, body)
+
+
+@router.post("/{run_id}/stop")
+async def stop_run(run_id: UUID, session: Session) -> RunSummary:
+    return await decisions.stop_run(session, run_id)
