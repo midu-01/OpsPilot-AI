@@ -57,7 +57,25 @@ The internal catalog in `app.tools.registry` exposes four typed tools. Read call
 | `date_math` | Computes calendar ranges in the run's business timezone. Its previous-month result supplies inclusive and exclusive shipment timestamps for `query_orders`. |
 | `query_orders` | Filters and paginates synthetic orders. For orders over $500, pass `min_amount_minor: 50000`. |
 | `search_policies` | Returns ranked matches with each policy's ID, version, source filename and excerpt. |
-| `issue_refund` | Requires human approval. A separate read-only preview uses shipment and ledger evidence to calculate the proposed amount in cents. Approval decisions and ledger execution belong to Phase 5. |
+| `issue_refund` | Requires human approval. A separate read-only preview uses shipment and ledger evidence to calculate the proposed amount in cents. The runner pauses for a persisted approval and executes the approved simulated refund once. |
+
+## Review a proposed refund
+
+Submit an explicit refund goal through `POST /runs`. When the run reaches `awaiting_approval`, `GET /runs/{id}` includes `pending_approval` with an ID, order, proposed amount in cents, reason, policy version and supporting evidence. Refreshing or restarting the backend preserves that proposal.
+
+Send the decision to `POST /runs/{id}/approve` using the saved approval ID.
+
+```json
+{"approval_id":"<saved approval UUID>","decision":"approve"}
+```
+
+To reject, send `"decision":"reject"` and a nonblank `"reason"`. The runner passes that reason to the model. Decisions requeue the saved tool call and remaining work. Turn, tool and active-time limits continue from their saved values, with human review time excluded from the active-time budget.
+
+Approved refunds create entries in the local simulated ledger. The transaction rechecks the order and refundable balance against the reviewed amount. Repeated decisions and equivalent refund requests preserve a single adjustment per order and policy version. Conflicting decisions return HTTP 409.
+
+`POST /runs/{id}/stop` cancels queued or waiting runs immediately. Active runs move through `cancelling` while their provider stream closes. Cancellation and refund execution lock the same run row. A cancellation that obtains that lock first blocks the refund, and an already committed refund stays in the trace.
+
+Use the [local API documentation](http://localhost:8000/docs) to exercise these operations. The dedicated frontend approval card is scheduled for Phase 7.
 
 ## Run and event contracts
 
