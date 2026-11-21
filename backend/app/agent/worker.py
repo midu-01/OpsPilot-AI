@@ -61,7 +61,7 @@ async def finish_interrupted(session: AsyncSession, run: Run, code: str, detail:
     for next_index, call in enumerate(calls, start=0 if index is None else index + 1):
         await save_tool_result(session, call, ToolFailure(error=ToolError(code=code, message=detail)), next_index)
 
-    cancelled = run.status == RunStatus.cancelling
+    cancelled = run.cancellation_requested or run.status == RunStatus.cancelling
     run.status = RunStatus.cancelled if cancelled else RunStatus.failed
     run.duration_ms = max(0, int((now - run.created_at).total_seconds() * 1000))
     await append_event(
@@ -94,6 +94,9 @@ async def claim(sessions: Sessions) -> tuple[UUID, str, str] | None:
             .with_for_update()
         )
         if run is None:
+            return None
+        if run.cancellation_requested:
+            await finish_interrupted(session, run, "CANCELLED", "Run was stopped by the user.")
             return None
         run.status = RunStatus.running
         await append_event(session, run.id, EventType.run_started, {"status": run.status})

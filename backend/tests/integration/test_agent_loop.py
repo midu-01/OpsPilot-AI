@@ -111,7 +111,7 @@ async def test_invalid_unknown_and_write_requests_are_observations(sessions: Ses
         "INVALID_ARGUMENTS",
         "UNKNOWN_TOOL",
         "INVALID_ARGUMENTS",
-        "APPROVAL_REQUIRED",
+        "REFUND_INELIGIBLE",
     ]
     assert [c.status for c in trace.messages[1].tool_calls] == ["failed"] * 4
     async with sessions() as session:
