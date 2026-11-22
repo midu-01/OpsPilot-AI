@@ -158,7 +158,12 @@ export class ApiError extends Error {
 
 export function getApiBaseUrl(): string {
   if (typeof window !== "undefined") {
-    return process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+    if (process.env.NEXT_PUBLIC_API_BASE_URL) {
+      return process.env.NEXT_PUBLIC_API_BASE_URL;
+    }
+    const hostname = window.location.hostname || "localhost";
+    const port = window.location.port === "13000" ? "18000" : "8000";
+    return `${window.location.protocol}//${hostname}:${port}`;
   }
   return process.env.API_INTERNAL_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 }
@@ -170,13 +175,22 @@ async function request<T>(
   const { baseUrl = getApiBaseUrl(), ...fetchOptions } = options;
   const url = new URL(path, baseUrl).toString();
 
-  const response = await fetch(url, {
-    ...fetchOptions,
-    headers: {
-      "Content-Type": "application/json",
-      ...fetchOptions.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...fetchOptions,
+      headers: {
+        "Content-Type": "application/json",
+        ...fetchOptions.headers,
+      },
+    });
+  } catch (err: unknown) {
+    throw new ApiError(
+      0,
+      `Network error: Could not reach the API at ${url}. Please verify that the backend service is running.`,
+      err instanceof Error ? err.message : undefined
+    );
+  }
 
   if (!response.ok) {
     let detail: string | undefined;
@@ -184,9 +198,13 @@ async function request<T>(
       const data = await response.json();
       detail = typeof data?.detail === "string" ? data.detail : JSON.stringify(data?.detail);
     } catch {
-      // not JSON
+      try {
+        detail = await response.text();
+      } catch {
+        // ignore
+      }
     }
-    throw new ApiError(response.status, `Request failed: ${response.status} ${response.statusText}`, detail);
+    throw new ApiError(response.status, `Request failed (${response.status}): ${detail || response.statusText}`, detail);
   }
 
   return response.json();
