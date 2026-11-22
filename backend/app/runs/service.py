@@ -4,12 +4,12 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from uuid import UUID
 
-from pydantic import JsonValue
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import Approval, Message, ModelCall, Run, RunEventRecord, ToolCall
+from app.runs.events import append_event as append_event
 from app.runs.schemas import (
     ApprovalSnapshot,
     ApprovalStatus,
@@ -23,24 +23,6 @@ from app.runs.schemas import (
     RunSummary,
     ToolCallSnapshot,
 )
-
-
-async def append_event(
-    session: AsyncSession, run_id: UUID, kind: EventType, payload: dict[str, JsonValue]
-) -> RunEventRecord:
-    """Allocate the sequence on the run row. The caller commits the event and domain change together."""
-    next_sequence = (
-        await session.execute(
-            update(Run)
-            .where(Run.id == run_id)
-            .values(next_event_sequence=Run.next_event_sequence + 1)
-            .returning(Run.next_event_sequence)
-        )
-    ).scalar_one()
-    event = RunEventRecord(run_id=run_id, sequence=next_sequence - 1, type=kind.value, payload=payload)
-    session.add(event)
-    await session.flush()
-    return event
 
 
 async def create_run(session: AsyncSession, goal: str) -> RunSummary:
@@ -81,6 +63,12 @@ async def list_runs(session: AsyncSession, page: int, page_size: int) -> Paginat
 
 
 async def get_snapshot(session: AsyncSession, run_id: UUID) -> RunSnapshot | None:
+    """Return a consistent run snapshot, full persisted trace, pending approval, and snapshot_cursor.
+
+    The snapshot returns all persisted events and messages under a shared read lock on the run row,
+    ensuring snapshot_cursor equals the latest included event. Any events committed after this cursor
+    will have sequence > snapshot_cursor and can be streamed without gaps or duplicates.
+    """
     # Writers reserve the event sequence on this same row before committing.
     # Keep the shared lock while reading the public trace and its cursor.
     async with session.begin():

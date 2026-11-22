@@ -85,3 +85,68 @@ def test_event_sse_formatting_and_roundtrip() -> None:
     assert parsed.type == EventType.tool_completed
     assert parsed.occurred_at == event.occurred_at
     assert parsed.payload == event.payload
+
+
+async def test_event_broker_subscribe_notify_unsubscribe() -> None:
+    from app.runs.events import EventBroker
+
+    broker = EventBroker()
+    run_id1 = uuid4()
+    run_id2 = uuid4()
+
+    sub1_run1 = await broker.subscribe(run_id1)
+    sub2_run1 = await broker.subscribe(run_id1)
+    sub1_run2 = await broker.subscribe(run_id2)
+
+    assert not sub1_run1.is_set()
+    assert not sub2_run1.is_set()
+    assert not sub1_run2.is_set()
+
+    # Notify run 1 only
+    broker.notify(run_id1)
+    assert sub1_run1.is_set()
+    assert sub2_run1.is_set()
+    assert not sub1_run2.is_set()
+
+    # Unsubscribe sub1
+    await broker.unsubscribe(run_id1, sub1_run1)
+    sub1_run1.clear()
+    broker.notify(run_id1)
+    assert not sub1_run1.is_set()  # unsubscribed
+
+    # Unsubscribe sub2 - cleans up run_id1 entry
+    await broker.unsubscribe(run_id1, sub2_run1)
+    assert run_id1 not in broker._subscribers
+
+
+async def test_event_post_commit_and_rollback_hooks() -> None:
+    from unittest.mock import MagicMock
+
+    from sqlalchemy.orm import Session
+
+    from app.runs.events import _register_post_commit_notification, get_broker
+
+    run_id = uuid4()
+    mock_session = MagicMock()
+    mock_session.info = {}
+    mock_session.sync_session = Session()
+
+    broker = get_broker()
+    sub = await broker.subscribe(run_id)
+    try:
+        # Register notification hook
+        _register_post_commit_notification(mock_session, run_id)
+        assert run_id in mock_session.info["runs_to_notify"]
+
+        # Simulate rollback: clears runs_to_notify
+        mock_session.sync_session.dispatch.after_rollback()
+        assert "runs_to_notify" not in mock_session.info
+        assert not sub.is_set()
+
+        # Register again and simulate commit
+        _register_post_commit_notification(mock_session, run_id)
+        mock_session.sync_session.dispatch.after_commit()
+        assert sub.is_set()
+    finally:
+        await broker.unsubscribe(run_id, sub)
+
