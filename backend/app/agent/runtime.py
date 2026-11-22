@@ -12,14 +12,20 @@ class ProviderConfigurationError(RuntimeError):
 
 def resolve_run_provider(provider_name: str, model: str) -> tuple[LLMProvider, Pricing | None]:
     if provider_name == "fake":
-        return FakeProvider(
-            [
+        if model == "scripted":
+            return FakeProvider(
                 [
-                    ModelEvent(ModelEventType.text_delta, text="Offline demo completed using the scripted provider."),
-                    ModelEvent(ModelEventType.turn_complete),
+                    [
+                        ModelEvent(
+                            ModelEventType.text_delta, text="Offline demo completed using the scripted provider."
+                        ),
+                        ModelEvent(ModelEventType.turn_complete),
+                    ]
                 ]
-            ]
-        ), None
+            ), None
+        from app.agent.scenario_provider import ScenarioProvider
+
+        return ScenarioProvider(), None
 
     endpoints = {
         "groq": ("https://api.groq.com/openai/v1", settings.groq_api_key),

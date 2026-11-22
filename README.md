@@ -83,6 +83,37 @@ The Pydantic models in `backend/app/runs/schemas.py` describe run creation, stat
 
 ## Verify locally
 
-Run `pnpm install --frozen-lockfile`, `pnpm lint`, and `pnpm typecheck` from `frontend/`. From `backend/`, run `uv sync --locked`, then `uv run pytest`, `uv run ruff check .`, and `uv run mypy app`. Backend unit tests use a scripted provider and do not require an OpenAI key.
+### 1. Backend verification and test suites
+From `backend/`:
+```sh
+uv sync --locked
+uv run ruff check .
+uv run mypy app
+uv run pytest
+```
+When `TEST_DATABASE_URL` is set to an accessible PostgreSQL database with `CREATEDB` permissions (e.g. in CI or local Postgres), the integration test suites run automatically:
+```sh
+uv run pytest -q tests/integration/test_scenario_reliability.py tests/integration/test_streaming.py
+uv run pytest -q tests/integration/test_agent_loop.py tests/integration/test_approvals.py tests/integration/test_approvals_api.py tests/integration/test_cancellation.py tests/integration/test_refund_execution.py tests/integration/test_worker.py
+```
 
-The console shows both the server-side database readiness check and the browser's independent request to the API. Select **Refresh status** to repeat both checks.
+### 2. Frontend checks and unit tests
+From `frontend/`:
+```sh
+pnpm install --frozen-lockfile
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+### 3. Isolated Compose verification
+Run the Phase 8 isolated test stack with simulated seed data and zero external API keys:
+```sh
+export P8_PROJECT="opspilot-p8-test"
+docker compose --env-file .env.example -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml up --build --wait -d
+curl -fsS http://127.0.0.1:18000/health/ready
+curl -fsS -o /dev/null http://127.0.0.1:13000/
+(cd frontend && E2E_EXTERNAL_STACK=1 pnpm exec playwright test tests/approval-flow.spec.ts tests/draft-only.spec.ts)
+docker compose -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml down -v --remove-orphans
+```
