@@ -28,6 +28,7 @@ def resolve_run_provider(provider_name: str, model: str) -> tuple[LLMProvider, P
         return ScenarioProvider(), None
 
     endpoints = {
+        "anthropic": ("https://api.anthropic.com/v1", settings.anthropic_api_key),
         "groq": ("https://api.groq.com/openai/v1", settings.groq_api_key),
     }
     if provider_name not in endpoints:

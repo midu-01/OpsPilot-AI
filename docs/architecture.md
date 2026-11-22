@@ -38,7 +38,7 @@ flowchart TD
   end
 
   subgraph Provider["LLM Provider Interface"]
-    ProviderAdapter[Groq / Scenario / Anthropic planned]
+    ProviderAdapter[Anthropic / Groq / Scenario]
   end
 
   subgraph Tools["Typed Tool Catalog"]
