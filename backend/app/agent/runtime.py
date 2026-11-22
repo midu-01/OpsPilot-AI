@@ -29,8 +29,6 @@ def resolve_run_provider(provider_name: str, model: str) -> tuple[LLMProvider, P
 
     endpoints = {
         "groq": ("https://api.groq.com/openai/v1", settings.groq_api_key),
-        "openai": ("https://api.openai.com/v1", settings.openai_api_key),
-        "omniroute": (str(settings.omniroute_base_url), settings.omniroute_api_key),
     }
     if provider_name not in endpoints:
         raise ProviderConfigurationError("Unsupported provider.")
