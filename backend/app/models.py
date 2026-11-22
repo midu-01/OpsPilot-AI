@@ -185,7 +185,7 @@ class RunEventRecord(Base):
     run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id"), primary_key=True)
     sequence: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     type: Mapped[str]
-    schema_version: Mapped[int] = mapped_column(server_default="1")
+    schema_version: Mapped[int] = mapped_column(server_default="1", default=1)
     occurred_at: Mapped[CreatedAt]
     payload: Mapped[JsonObject] = mapped_column(server_default=text("'{}'::jsonb"))
 
