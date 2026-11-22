@@ -40,7 +40,7 @@ flowchart TD
   end
 
   subgraph Providers["LLM Provider Boundary"]
-    Adapter["OpenAI / Groq / OmniRoute / ScenarioProvider"]
+    Adapter["Groq / ScenarioProvider (Anthropic planned)"]
   end
 
   subgraph Tools["Typed Tool Registry"]
@@ -121,9 +121,7 @@ cp .env.example .env
 
 | `LLM_PROVIDER` | Required Settings | Capabilities |
 | --- | --- | --- |
-| `groq` *(default)* | `GROQ_API_KEY`, `GROQ_MODEL=openai/gpt-oss-20b` | High-speed native function calling on hosted models. |
-| `openai` | `OPENAI_API_KEY`, `OPENAI_MODEL=gpt-4o` | OpenAI Responses API with native tool calling. |
-| `omniroute` | `OMNIROUTE_API_KEY`, `OMNIROUTE_MODEL`, `OMNIROUTE_BASE_URL` | Self-hosted or reverse-proxy OpenAI-compatible endpoints. |
+| `groq` *(default)* | `GROQ_API_KEY`, `GROQ_MODEL=openai/gpt-oss-20b` | High-speed native function calling on hosted models (Anthropic support planned). |
 | `fake` | *No key needed* | Deterministic multi-turn scenario simulation for offline demos and CI. |
 
 Restart the backend container to apply environment changes:

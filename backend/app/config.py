@@ -34,14 +34,9 @@ class Settings(BaseSettings):
     database_url: Annotated[PostgresDsn, UrlConstraints(allowed_schemes=["postgresql+asyncpg"], host_required=True)] = (
         PostgresDsn("postgresql+asyncpg://localhost:5432/opspilot")
     )
-    llm_provider: Literal["openai", "groq", "omniroute", "fake"] = "openai"
-    openai_api_key: SecretStr = SecretStr("")
-    openai_model: str = "gpt-4o"
+    llm_provider: Literal["groq", "fake"] = "groq"
     groq_api_key: SecretStr = SecretStr("")
     groq_model: str = "openai/gpt-oss-20b"
-    omniroute_api_key: SecretStr = SecretStr("")
-    omniroute_model: str = "antigravity/gemini-3.8-flash-high"
-    omniroute_base_url: HttpUrl = HttpUrl("http://localhost:20128/v1")
     model_prices: dict[str, ModelRates] = Field(default_factory=dict)
     business_timezone: str = "UTC"
     max_agent_steps: PositiveInt = 20
@@ -53,18 +48,9 @@ class Settings(BaseSettings):
     @property
     def selected_model(self) -> str:
         return {
-            "openai": self.openai_model,
             "groq": self.groq_model,
-            "omniroute": self.omniroute_model,
             "fake": "scripted",
         }[self.llm_provider]
-
-    @field_validator("omniroute_base_url")
-    @classmethod
-    def validate_route_base(cls, value: HttpUrl) -> HttpUrl:
-        if value.username or value.password or value.fragment or value.query or (value.path or "").rstrip("/") != "/v1":
-            raise ValueError("Use the OmniRoute API base ending in /v1")
-        return value
 
     @field_validator("business_timezone")
     @classmethod
