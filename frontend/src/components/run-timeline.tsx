@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import type { MessageSnapshot, ToolCallSnapshot, ApprovalSnapshot, RunStatus } from "../lib/api";
 
 interface RunTimelineProps {
@@ -179,18 +180,24 @@ export default function RunTimeline({
       {status === "failed" && (
         <div className="card" style={{ borderLeft: "4px solid var(--color-danger)" }} role="alert">
           <h3 style={{ margin: "0 0 6px", color: "var(--color-danger)" }}>✕ Run Failed</h3>
-          <p style={{ margin: 0, color: "var(--color-danger)" }}>
+          <p style={{ margin: "0 0 14px", color: "var(--color-danger)" }}>
             {error || "An error occurred during execution."}
           </p>
+          <Link href="/" className="btn btn-secondary" style={{ padding: "6px 14px", fontSize: "0.85rem" }}>
+            Start a New Run →
+          </Link>
         </div>
       )}
 
       {status === "cancelled" && (
         <div className="card" style={{ borderLeft: "4px solid #64748b" }} role="status">
           <h3 style={{ margin: "0 0 6px", color: "#475569" }}>⏹ Run Cancelled</h3>
-          <p style={{ margin: 0, color: "var(--color-text-muted)" }}>
+          <p style={{ margin: "0 0 14px", color: "var(--color-text-muted)" }}>
             Execution was stopped by user request.
           </p>
+          <Link href="/" className="btn btn-secondary" style={{ padding: "6px 14px", fontSize: "0.85rem" }}>
+            Start a New Run →
+          </Link>
         </div>
       )}
     </div>
