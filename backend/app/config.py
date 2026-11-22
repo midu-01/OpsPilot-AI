@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     )
     llm_provider: Literal["groq", "anthropic", "fake"] = "anthropic"
     anthropic_api_key: SecretStr = SecretStr("")
-    anthropic_model: str = "claude-3-5-haiku-20241022"
+    anthropic_model: str = "claude-haiku-4-5-20251001"
     groq_api_key: SecretStr = SecretStr("")
     groq_model: str = "openai/gpt-oss-20b"
     model_prices: dict[str, ModelRates] = Field(default_factory=dict)

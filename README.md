@@ -127,7 +127,7 @@ cp .env.example .env
 
 | `LLM_PROVIDER` | Required Settings | Capabilities |
 | --- | --- | --- |
-| `anthropic` *(default)* | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL=claude-3-5-haiku-20241022` | Claude native Messages API with streaming tool calling. |
+| `anthropic` *(default)* | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL=claude-haiku-4-5-20251001` | Claude native Messages API with streaming tool calling. |
 | `groq` | `GROQ_API_KEY`, `GROQ_MODEL=openai/gpt-oss-20b` | High-speed native function calling on hosted models. |
 | `fake` | *No key needed* | Deterministic multi-turn scenario simulation for offline demos and CI. |
 
