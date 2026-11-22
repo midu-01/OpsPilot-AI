@@ -34,7 +34,9 @@ class Settings(BaseSettings):
     database_url: Annotated[PostgresDsn, UrlConstraints(allowed_schemes=["postgresql+asyncpg"], host_required=True)] = (
         PostgresDsn("postgresql+asyncpg://localhost:5432/opspilot")
     )
-    llm_provider: Literal["groq", "fake"] = "groq"
+    llm_provider: Literal["groq", "anthropic", "fake"] = "anthropic"
+    anthropic_api_key: SecretStr = SecretStr("")
+    anthropic_model: str = "claude-3-5-haiku-20241022"
     groq_api_key: SecretStr = SecretStr("")
     groq_model: str = "openai/gpt-oss-20b"
     model_prices: dict[str, ModelRates] = Field(default_factory=dict)
@@ -49,6 +51,7 @@ class Settings(BaseSettings):
     def selected_model(self) -> str:
         return {
             "groq": self.groq_model,
+            "anthropic": self.anthropic_model,
             "fake": "scripted",
         }[self.llm_provider]
 

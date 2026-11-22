@@ -268,6 +268,150 @@ class _ResponsesTurn:
         return [*events, ModelEvent(ModelEventType.turn_complete, response_items=self.output)]
 
 
+class _AnthropicTurn:
+    path = "messages"
+
+    def __init__(self) -> None:
+        self.calls: dict[int, dict[str, str]] = {}
+        self.input_tokens: int | None = None
+        self.output_tokens: int | None = None
+        self.usage: ModelEvent | None = None
+        self.complete = False
+
+    def payload(self, messages: list[ProviderMessage], tools: list[dict[str, Any]]) -> dict[str, Any]:
+        system_prompt = ""
+        anthropic_messages: list[dict[str, Any]] = []
+
+        for m in messages:
+            if m.role == "system":
+                system_prompt = (m.content or "") if not system_prompt else f"{system_prompt}\n{m.content or ''}"
+            elif m.role == "user":
+                anthropic_messages.append({"role": "user", "content": m.content or ""})
+            elif m.role == "assistant":
+                content_blocks: list[dict[str, Any]] = []
+                if m.content:
+                    content_blocks.append({"type": "text", "text": m.content})
+                for tc in m.tool_calls:
+                    fn = tc.get("function", {})
+                    raw_args = fn.get("arguments", "{}")
+                    try:
+                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    except Exception:
+                        args = {}
+                    content_blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.get("id", ""),
+                            "name": fn.get("name", ""),
+                            "input": args if isinstance(args, dict) else {},
+                        }
+                    )
+                anthropic_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content_blocks if content_blocks else (m.content or ""),
+                    }
+                )
+            elif m.role == "tool":
+                call_id = m.tool_call_id or ""
+                res_content = m.content or ""
+                tool_block = {
+                    "type": "tool_result",
+                    "tool_use_id": call_id,
+                    "content": res_content,
+                }
+                if (
+                    anthropic_messages
+                    and anthropic_messages[-1]["role"] == "user"
+                    and isinstance(anthropic_messages[-1]["content"], list)
+                ):
+                    anthropic_messages[-1]["content"].append(tool_block)
+                else:
+                    anthropic_messages.append(
+                        {
+                            "role": "user",
+                            "content": [tool_block],
+                        }
+                    )
+
+        anthropic_tools = [
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "input_schema": t["parameters"],
+            }
+            for t in tools
+        ]
+
+        body: dict[str, Any] = {
+            "max_tokens": 4096,
+            "messages": anthropic_messages,
+        }
+        if system_prompt:
+            body["system"] = system_prompt
+        if anthropic_tools:
+            body["tools"] = anthropic_tools
+        return body
+
+    def consume(self, data: str) -> str | None:
+        try:
+            event = json.loads(data)
+        except Exception:
+            return None
+
+        event_type = event.get("type")
+        if event_type == "message_start":
+            msg = event.get("message", {})
+            u = msg.get("usage", {})
+            self.input_tokens = _token_count(u.get("input_tokens"))
+            return None
+
+        if event_type == "content_block_start":
+            idx = event.get("index", 0)
+            block = event.get("content_block", {})
+            if block.get("type") == "tool_use":
+                self.calls[idx] = {
+                    "id": _string(block.get("id", "")),
+                    "name": _string(block.get("name", "")),
+                    "arguments": "",
+                }
+            return None
+
+        if event_type == "content_block_delta":
+            idx = event.get("index", 0)
+            delta = event.get("delta", {})
+            delta_type = delta.get("type")
+            if delta_type == "text_delta":
+                return _string(delta.get("text", ""))
+            if delta_type == "input_json_delta" and idx in self.calls:
+                self.calls[idx]["arguments"] += delta.get("partial_json", "")
+            return None
+
+        if event_type == "message_delta":
+            u = event.get("usage", {})
+            self.output_tokens = _token_count(u.get("output_tokens"))
+            if self.input_tokens is not None or self.output_tokens is not None:
+                self.usage = ModelEvent(
+                    ModelEventType.usage,
+                    input_tokens=self.input_tokens,
+                    output_tokens=self.output_tokens,
+                )
+            return None
+
+        if event_type == "message_stop":
+            self.complete = True
+            return None
+
+        return None
+
+    def finish(self) -> list[ModelEvent]:
+        events = [
+            _tool_call(call["id"], call["name"], call["arguments"])
+            for call in self.calls.values()
+        ]
+        return [*events, ModelEvent(ModelEventType.turn_complete)]
+
+
 class StreamingProvider:
     def __init__(
         self,
@@ -278,7 +422,7 @@ class StreamingProvider:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        if provider not in {"openai", "groq", "omniroute"}:
+        if provider not in {"openai", "groq", "omniroute", "anthropic"}:
             raise ValueError("Unsupported provider.")
         self.provider = provider
         self.model = model
@@ -289,13 +433,27 @@ class StreamingProvider:
     async def stream_turn(
         self, messages: list[ProviderMessage], tool_definitions: list[ToolDefinition]
     ) -> AsyncIterator[ModelEvent]:
-        turn = _ResponsesTurn() if self.provider == "openai" else _ChatTurn()
+        if self.provider == "anthropic":
+            turn: _ResponsesTurn | _ChatTurn | _AnthropicTurn = _AnthropicTurn()
+            headers = {
+                "Accept": "text/event-stream",
+                "x-api-key": self._api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+        elif self.provider == "openai":
+            turn = _ResponsesTurn()
+            headers = {"Accept": "text/event-stream"}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+        else:
+            turn = _ChatTurn()
+            headers = {"Accept": "text/event-stream"}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
         tools = [
             {"name": t.name, "description": t.description, "parameters": t.parameters_schema} for t in tool_definitions
         ]
-        headers = {"Accept": "text/event-stream"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
         error = "The provider returned an invalid or incomplete stream."
         reported_usage = None
         try:
