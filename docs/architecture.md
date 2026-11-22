@@ -38,7 +38,7 @@ flowchart TD
   end
 
   subgraph Provider["LLM Provider Interface"]
-    ProviderAdapter[OpenAI / Groq / OmniRoute / Scenario]
+    ProviderAdapter[Groq / Scenario / Anthropic planned]
   end
 
   subgraph Tools["Typed Tool Catalog"]

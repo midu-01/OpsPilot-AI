@@ -1,7 +1,6 @@
 from decimal import Decimal
 
 import pytest
-from pydantic import ValidationError
 
 from app.agent import runtime
 from app.agent.contracts import ModelEventType
@@ -27,9 +26,9 @@ def test_groq_settings_keep_credentials_and_pricing_bound_to_provider(monkeypatc
         runtime.resolve_run_provider("openai", config.selected_model)
 
 
-def test_omniroute_uses_api_base_without_editor_url_fragment() -> None:
-    with pytest.raises(ValidationError):
-        Settings.model_validate({"omniroute_base_url": "http://localhost:20128/v1/chat/completions#editor"})
+def test_unsupported_provider_raises_error() -> None:
+    with pytest.raises(runtime.ProviderConfigurationError):
+        runtime.resolve_run_provider("unsupported_provider", "some-model")
 
 
 async def test_fake_runs_have_independent_scripts() -> None:
