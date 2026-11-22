@@ -60,14 +60,17 @@ flowchart TD
   AgentLoop -->|Stream turn messages| ProviderAdapter
   ProviderAdapter -->|Text deltas & tool calls| AgentLoop
   AgentLoop -->|Append message.delta & tool.requested| EventsTbl
-  AgentLoop -->|Dispatch read tools| DateMath & QueryOrders & SearchPolicies
+  AgentLoop -->|Dispatch read tools| DateMath
+  AgentLoop -->|Dispatch read tools| QueryOrders
+  AgentLoop -->|Dispatch read tools| SearchPolicies
 
   AgentLoop -->|Propose refund| IssueRefund
   IssueRefund -->|Persist pending approval| ApprTbl
   IssueRefund -->|Pause run & release worker| RunsTbl
 
   ApprovalUI -->|POST /runs/:id/approve| Routes
-  Routes -->|Verify proposal & requeue| ApprTbl & RunsTbl
+  Routes -->|Verify proposal & requeue| ApprTbl
+  Routes -->|Requeue run| RunsTbl
   QueueClaim -->|Resume approved tool batch| AgentLoop
   AgentLoop -->|Lock order & commit refund| RefundsTbl
 
