@@ -21,6 +21,10 @@ async_session_factory = async_sessionmaker(
 )
 
 
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    return async_session_factory
+
+
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """Yield a new async session, closing it on completion."""
     async with async_session_factory() as session:

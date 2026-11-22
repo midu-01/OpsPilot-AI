@@ -2,6 +2,8 @@
 
 import asyncio
 from collections import defaultdict
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager
 from uuid import UUID
 
 from pydantic import JsonValue
@@ -111,3 +113,51 @@ async def get_run_stream_info(session: AsyncSession, run_id: UUID) -> tuple[RunS
         return None
     latest_sequence = run.next_event_sequence - 1
     return RunStatus(run.status), latest_sequence
+
+
+async def stream_events(
+    session_opener: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+    run_id: UUID,
+    cursor: int,
+    *,
+    keepalive_timeout: float = 15.0,
+) -> AsyncIterator[str]:
+    """Yield incremental SSE frames for run_id strictly after cursor.
+
+    Reads bounded batches from PostgreSQL. Never executes or resumes the agent.
+    Sends keepalive comments during quiet periods. Closes when the run reaches
+    a terminal status and all events up to the terminal sequence have been delivered.
+    """
+    broker = get_broker()
+    sub_event = await broker.subscribe(run_id)
+    current_cursor = cursor
+    try:
+        while True:
+            async with session_opener() as session:
+                events = await read_events(session, run_id, after=current_cursor, limit=100)
+                stream_info = await get_run_stream_info(session, run_id)
+
+            if stream_info is None:
+                break
+            status, latest_seq = stream_info
+
+            if events:
+                for event in events:
+                    yield event.to_sse()
+                    current_cursor = event.sequence
+                if len(events) >= 100:
+                    continue
+
+            if status in TERMINAL_STATUSES:
+                if current_cursor >= latest_seq:
+                    break
+                continue
+
+            try:
+                await asyncio.wait_for(sub_event.wait(), timeout=keepalive_timeout)
+                sub_event.clear()
+            except TimeoutError:
+                yield KEEPALIVE_FRAME
+    finally:
+        await broker.unsubscribe(run_id, sub_event)
+
