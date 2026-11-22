@@ -154,6 +154,10 @@ class RunEvent(BaseModel):
     occurred_at: AwareDatetime
     payload: dict[str, JsonValue] = Field(default_factory=dict)
 
+    def to_sse(self) -> str:
+        """Format event into a standard SSE frame with id, event, and data."""
+        return f"id: {self.sequence}\nevent: {self.type.value}\ndata: {self.model_dump_json()}\n\n"
+
 
 class ModelAttemptSnapshot(BaseModel):
     id: UUID
