@@ -1,26 +1,43 @@
+import GoalComposer from "../components/goal-composer";
 import BrowserConnection from "./browser-connection";
 import { checkReadiness } from "../lib/api";
 
 export const dynamic = "force-dynamic";
 
-export default async function Workspace() {
+export default async function HomePage() {
   const ready = await checkReadiness(process.env.API_INTERNAL_URL ?? "http://localhost:8000");
   const browserOrigin = process.env.BROWSER_API_BASE_URL ?? "http://localhost:8000";
+
   return (
     <>
-      <header><div className="brand"><span className="mark" aria-hidden="true">O</span> OpsPilot</div><span>Local workspace</span></header>
-      <main>
-        <h1>Agent Run Console</h1>
-        <section aria-labelledby="connection">
-          <h2 id="connection">Workspace connections</h2>
-          <dl>
-            <div><dt>Frontend</dt><dd>Online</dd></div>
-            <div><dt>Backend &amp; database</dt><dd className={ready ? "ready" : "offline"}>{ready ? "Connected" : "Unavailable"}</dd></div>
-            <div><dt>Browser to API</dt><BrowserConnection apiOrigin={browserOrigin} /></div>
-          </dl>
-          <form action="/" method="get"><button type="submit">Refresh status</button></form>
-        </section>
-      </main>
+      <h1 className="page-title">Agent Run Console</h1>
+      <p className="page-subtitle">
+        Enter an operations goal. The agent plans steps, queries orders, checks shipping
+        policies, and pauses for human approval before write actions.
+      </p>
+
+      {/* Goal Composer Card */}
+      <GoalComposer />
+
+      {/* System Status Panel */}
+      <section className="card" aria-labelledby="status-heading" style={{ marginTop: "32px" }}>
+        <h2 id="status-heading" style={{ fontSize: "1rem", margin: "0 0 12px" }}>
+          Environment Status
+        </h2>
+        <dl style={{ margin: 0 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid var(--color-border)" }}>
+            <dt style={{ color: "var(--color-text-muted)" }}>Backend &amp; Database</dt>
+            <dd className={ready ? "badge badge-completed" : "badge badge-failed"}>
+              {ready ? "Connected" : "Unavailable"}
+            </dd>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0" }}>
+            <dt style={{ color: "var(--color-text-muted)" }}>Browser to API</dt>
+            <BrowserConnection apiOrigin={browserOrigin} />
+          </div>
+        </dl>
+      </section>
     </>
   );
 }
+
