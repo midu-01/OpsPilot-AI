@@ -158,9 +158,13 @@ export class ApiError extends Error {
 
 export function getApiBaseUrl(): string {
   if (typeof window !== "undefined") {
-    return process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+    return process.env.NEXT_PUBLIC_API_BASE_URL ?? `${window.location.origin}/api`;
   }
-  return process.env.API_INTERNAL_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+  return process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8000";
+}
+
+function apiUrl(path: string, base = getApiBaseUrl()): URL {
+  return new URL(path.replace(/^\/+/, ""), `${base.replace(/\/+$/, "")}/`);
 }
 
 async function request<T>(
@@ -168,25 +172,33 @@ async function request<T>(
   options: RequestInit & { baseUrl?: string } = {}
 ): Promise<T> {
   const { baseUrl = getApiBaseUrl(), ...fetchOptions } = options;
-  const url = new URL(path, baseUrl).toString();
+  const url = apiUrl(path, baseUrl).toString();
 
-  const response = await fetch(url, {
-    ...fetchOptions,
-    headers: {
-      "Content-Type": "application/json",
-      ...fetchOptions.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...fetchOptions,
+      headers: {
+        "Content-Type": "application/json",
+        ...fetchOptions.headers,
+      },
+    });
+  } catch (err: unknown) {
+    if (fetchOptions.signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+    const detail = "Could not reach the API. Check that the frontend and backend services are running, then try again.";
+    throw new ApiError(0, detail, detail);
+  }
 
   if (!response.ok) {
-    let detail: string | undefined;
+    const text = await response.text();
+    let detail: string | undefined = text || undefined;
     try {
-      const data = await response.json();
+      const data = JSON.parse(text);
       detail = typeof data?.detail === "string" ? data.detail : JSON.stringify(data?.detail);
     } catch {
-      // not JSON
+      // Preserve text errors rather than trying to read an already-consumed body.
     }
-    throw new ApiError(response.status, `Request failed: ${response.status} ${response.statusText}`, detail);
+    throw new ApiError(response.status, `Request failed (${response.status}): ${detail || response.statusText}`, detail);
   }
 
   return response.json();
@@ -244,8 +256,7 @@ export async function stopRun(runId: string, options?: { signal?: AbortSignal })
 }
 
 export function getStreamUrl(runId: string, after?: number): string {
-  const base = getApiBaseUrl();
-  const url = new URL(`/runs/${runId}/stream`, base);
+  const url = apiUrl(`/runs/${runId}/stream`);
   if (after !== undefined && after > 0) {
     url.searchParams.set("after", after.toString());
   }
@@ -260,7 +271,7 @@ export async function checkReadiness(origin: string, cancel?: AbortSignal): Prom
   const timeout = setTimeout(abort, 4000);
 
   try {
-    const response = await fetch(new URL("/health/ready", origin), {
+    const response = await fetch(apiUrl("/health/ready", origin), {
       cache: "no-store",
       signal: controller.signal,
     });
