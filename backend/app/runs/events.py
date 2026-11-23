@@ -60,13 +60,13 @@ def _register_post_commit_notification(session: AsyncSession, run_id: UUID) -> N
         session.info["runs_to_notify"] = set()
 
         @sa_event.listens_for(session.sync_session, "after_commit", once=True)
-        def _on_commit() -> None:
+        def _on_commit(*_args: object) -> None:
             runs = session.info.pop("runs_to_notify", set())
             for rid in runs:
                 get_broker().notify(rid)
 
         @sa_event.listens_for(session.sync_session, "after_rollback", once=True)
-        def _on_rollback() -> None:
+        def _on_rollback(*_args: object) -> None:
             session.info.pop("runs_to_notify", None)
 
     session.info["runs_to_notify"].add(run_id)
