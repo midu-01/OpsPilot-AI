@@ -15,6 +15,7 @@ flowchart TD
     History["Runs History (/runs)"]
     Reducer["Sequence-Aware Event Reducer"]
     StreamReader["SSE ReadableStream Reader"]
+    ApiProxy["Same-origin /api proxy"]
   end
 
   subgraph Backend["FastAPI Backend (Async and Typed Pydantic v2)"]
@@ -50,7 +51,8 @@ flowchart TD
     IssueRefund["issue_refund (approval-gated write)"]
   end
 
-  Composer -->|POST /runs (202 Accepted)| HTTPRoutes
+  Composer -->|POST /api/runs| ApiProxy
+  ApiProxy -->|POST /runs - 202 Accepted| HTTPRoutes
   HTTPRoutes -->|Persist run and message| RunsTbl
   HTTPRoutes -->|Persist user message| MsgsTbl
   HTTPRoutes -->|Append run.queued| EventsTbl
@@ -69,16 +71,18 @@ flowchart TD
   IssueRefund -->|Persist pending approval| ApprTbl
   IssueRefund -->|Pause run and release worker| RunsTbl
 
-  ApprovalUI -->|POST /runs/:id/approve| HTTPRoutes
+  ApprovalUI -->|POST /api/runs/:id/approve| ApiProxy
   HTTPRoutes -->|Save decision and requeue run| ApprTbl
   HTTPRoutes -->|Requeue run| RunsTbl
   QueueClaim -->|Resume approved batch| AgentLoop
   AgentLoop -->|Verify order and commit refund| RefundsTbl
 
-  StreamReader -->|GET /runs/:id/stream?after=N| SSEEndpoint
+  StreamReader -->|GET /api/runs/:id/stream?after=N| ApiProxy
+  ApiProxy -->|GET /runs/:id/stream?after=N| SSEEndpoint
   SSEEndpoint -->|Read bounded committed events| EventsTbl
   Broker -.->|Post-commit wake-up hint| SSEEndpoint
-  SSEEndpoint -->|id, event, data frames| StreamReader
+  SSEEndpoint -->|id, event, data frames| ApiProxy
+  ApiProxy -->|Unbuffered SSE frames| StreamReader
   StreamReader -->|Deduplicate by sequence| Reducer
   Reducer --> Console
   Reducer --> ApprovalUI
@@ -98,6 +102,22 @@ docker compose up --build -d
 # 2. Verify service health
 docker compose ps
 ```
+
+### Browser API connection
+
+The browser sends commands, readiness checks, and SSE subscriptions to `/api` on the **same origin as the console**. Next.js forwards them to `API_INTERNAL_URL` (`http://backend:8000` in Compose; `http://127.0.0.1:8000` for native development). No browser-side port mapping or CORS permission is needed for the default console path, including the isolated test ports. SSE bodies are forwarded without buffering, with the replay cursor intact.
+
+`NEXT_PUBLIC_API_BASE_URL` is an optional **build-time** override for deployments intentionally using a separate browser API. Such deployments must configure CORS and browser network permissions themselves; do not set this override for the normal Compose setup.
+
+After pulling a frontend or backend fix, rebuild the running services from the repository root:
+
+```sh
+docker compose up -d --build --wait backend frontend
+```
+
+This preserves the database volume. Reload the browser after the rebuild; the running container does not automatically pick up source edits.
+
+If submission shows a connection error, check `/api/health/ready` on the console's origin and inspect `docker compose logs --tail=50 frontend backend`. HTTP 502 means Next.js cannot reach `API_INTERNAL_URL`; HTTP 422 means input validation failed. `PROVIDER_CONFIGURATION_ERROR` **after a run ID is returned** is a separate provider setup problem: check that the selected provider's server-side key is set in the ignored `.env`, then recreate the backend. Do not share keys or raw environment output.
 
 ### Access Points
 - **Next.js Console:** [http://localhost:3000](http://localhost:3000) (or [http://127.0.0.1:3000](http://127.0.0.1:3000))
