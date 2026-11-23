@@ -1,18 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { checkReadiness } from "../lib/api";
+import { checkReadiness, getApiBaseUrl } from "../lib/api";
 
-export default function BrowserConnection({ apiOrigin }: { apiOrigin: string }) {
+export default function BrowserConnection() {
   const [ready, setReady] = useState<boolean | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
-    checkReadiness(apiOrigin, controller.signal).then((connected) => {
+    checkReadiness(getApiBaseUrl(), controller.signal).then((connected) => {
       if (!controller.signal.aborted) setReady(connected);
     });
     return () => controller.abort();
-  }, [apiOrigin]);
+  }, []);
 
   return (
     <dd aria-live="polite" className={ready === false ? "offline" : undefined}>

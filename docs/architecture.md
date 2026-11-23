@@ -14,6 +14,7 @@ flowchart TD
     Timeline[Execution Timeline]
     ApprovalUI[Human Approval Card]
     StreamClient[SSE ReadableStream Client]
+    ApiProxy["Same-origin /api proxy"]
   end
 
   subgraph API["FastAPI Backend (Async Endpoints)"]
@@ -48,7 +49,8 @@ flowchart TD
     IssueRefund[issue_refund (Approval Gated)]
   end
 
-  Composer -->|POST /runs| Routes
+  Composer -->|POST /api/runs| ApiProxy
+  ApiProxy -->|POST /runs| Routes
   Routes -->|Persist run & user message| RunsTbl
   Routes -->|Persist run & user message| MsgsTbl
   Routes -->|Append run.queued| EventsTbl
@@ -68,16 +70,18 @@ flowchart TD
   IssueRefund -->|Persist pending approval| ApprTbl
   IssueRefund -->|Pause run & release worker| RunsTbl
 
-  ApprovalUI -->|POST /runs/:id/approve| Routes
+  ApprovalUI -->|POST /api/runs/:id/approve| ApiProxy
   Routes -->|Verify proposal & requeue| ApprTbl
   Routes -->|Requeue run| RunsTbl
   QueueClaim -->|Resume approved tool batch| AgentLoop
   AgentLoop -->|Lock order & commit refund| RefundsTbl
 
-  StreamClient -->|GET /runs/:id/stream?after=N| Routes
+  StreamClient -->|GET /api/runs/:id/stream?after=N| ApiProxy
+  ApiProxy -->|GET /runs/:id/stream?after=N| Routes
   Routes -->|Read bounded committed events| EventsTbl
   EventsService -.->|Wake-up hint after commit| Routes
-  Routes -->|SSE frames id, event, data| StreamClient
+  Routes -->|SSE frames id, event, data| ApiProxy
+  ApiProxy -->|Unbuffered SSE frames| StreamClient
   StreamClient -->|Deduplicate & reduce| Console
   Console --> Timeline & ApprovalUI
 ```
@@ -88,7 +92,7 @@ flowchart TD
 
 ### Step 1: Goal Submission
 1. The user enters an operations goal in the Next.js Goal Composer (`/`).
-2. Client sends `POST /runs` with `{"goal": "..."}`.
+2. Client sends `POST /api/runs` with `{"goal": "..."}` to the console's own origin. The [Next.js API proxy](../frontend/src/app/api/[...path]/route.ts) forwards the request to `POST /runs` at the server-only `API_INTERNAL_URL`. This removes browser CORS, private-network permission, and guessed-port dependencies.
 3. FastAPI validates the goal length ($1 \le \text{length} \le 2000$) and begins a short transaction:
    - Inserts `runs` row with `status = "queued"`, budget limits, and `next_event_sequence = 2`.
    - Inserts `messages` row with `index = 0`, `role = "user"`, `text = goal`.

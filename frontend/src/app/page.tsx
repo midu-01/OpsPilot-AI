@@ -5,8 +5,7 @@ import { checkReadiness } from "../lib/api";
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const ready = await checkReadiness(process.env.API_INTERNAL_URL ?? "http://localhost:8000");
-  const browserOrigin = process.env.BROWSER_API_BASE_URL ?? "http://localhost:8000";
+  const ready = await checkReadiness(process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8000");
 
   return (
     <>
@@ -33,7 +32,7 @@ export default async function HomePage() {
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0" }}>
             <dt style={{ color: "var(--color-text-muted)" }}>Browser to API</dt>
-            <BrowserConnection apiOrigin={browserOrigin} />
+            <BrowserConnection />
           </div>
         </dl>
       </section>
