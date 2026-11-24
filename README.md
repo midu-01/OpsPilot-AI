@@ -4,7 +4,7 @@ OpsPilot AI is an operations copilot built with **Next.js 16 (App Router)** and 
 
 ---
 
-## Architectural Overview
+## Architecture Diagram & System Overview
 
 ```mermaid
 flowchart TD
@@ -91,49 +91,85 @@ flowchart TD
 
 ---
 
-## Quick Start (One-Command Startup)
+## Setup Instructions
 
-With Docker Engine and Docker Compose installed:
+### Prerequisites
+- **Containerized Run (Recommended):** [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine with Docker Compose v2.
+- **Native Local Development (Optional):** Python 3.12+, Node.js 20+, [pnpm](https://pnpm.io/) 10+, [uv](https://docs.astral.sh/uv/) package manager, and a local PostgreSQL 17 instance.
 
-```sh
-# 1. Start all services (Database, Backend API, Frontend Console)
-docker compose up --build -d
+---
 
-# 2. Verify service health
-docker compose ps
-```
+### Option A: Quick Start with Docker Compose (Recommended)
 
-### Browser API connection
+1. **Clone and configure environment:**
+   ```sh
+   cp .env.example .env
+   ```
+   *(By default, `LLM_PROVIDER=fake` runs offline deterministic multi-turn scenarios without needing any external API keys).*
+
+2. **Launch all containers in detached mode:**
+   ```sh
+   docker compose up --build -d
+   ```
+
+3. **Verify running containers and health:**
+   ```sh
+   docker compose ps
+   ```
+
+4. **Follow startup logs:**
+   ```sh
+   docker compose logs -f backend
+   ```
+
+5. **Stop containers (preserving database volume):**
+   ```sh
+   docker compose down
+   ```
+
+---
+
+### Option B: Native Local Development Setup
+
+If running without Docker:
+
+1. **Start PostgreSQL 17:**
+   Ensure a local PostgreSQL instance is running on port 5432 with a database named `opspilot`.
+
+2. **Set up the Backend (FastAPI):**
+   ```sh
+   cd backend
+   uv sync
+   uv run alembic upgrade head
+   uv run python -m app.seed
+   uv run uvicorn app.main:app --reload --port 8000
+   ```
+
+3. **Set up the Frontend (Next.js):**
+   ```sh
+   cd frontend
+   pnpm install
+   pnpm dev
+   ```
+
+---
+
+### Browser API Connection & Proxy Routing
 
 The browser sends commands, readiness checks, and SSE subscriptions to `/api` on the **same origin as the console**. Next.js forwards them to `API_INTERNAL_URL` (`http://backend:8000` in Compose; `http://127.0.0.1:8000` for native development). No browser-side port mapping or CORS permission is needed for the default console path, including the isolated test ports. SSE bodies are forwarded without buffering, with the replay cursor intact.
 
 `NEXT_PUBLIC_API_BASE_URL` is an optional **build-time** override for deployments intentionally using a separate browser API. Such deployments must configure CORS and browser network permissions themselves; do not set this override for the normal Compose setup.
 
 After pulling a frontend or backend fix, rebuild the running services from the repository root:
-
 ```sh
 docker compose up -d --build --wait backend frontend
 ```
-
-This preserves the database volume. Reload the browser after the rebuild; the running container does not automatically pick up source edits.
-
-If submission shows a connection error, check `/api/health/ready` on the console's origin and inspect `docker compose logs --tail=50 frontend backend`. HTTP 502 means Next.js cannot reach `API_INTERNAL_URL`; HTTP 422 means input validation failed. `PROVIDER_CONFIGURATION_ERROR` **after a run ID is returned** is a separate provider setup problem: check that the selected provider's server-side key is set in the ignored `.env`, then recreate the backend. Do not share keys or raw environment output.
 
 ### Access Points
 - **Next.js Console:** [http://localhost:3000](http://localhost:3000) (or [http://127.0.0.1:3000](http://127.0.0.1:3000))
 - **FastAPI Interactive Docs (Swagger):** [http://localhost:8000/docs](http://localhost:8000/docs)
 - **Backend Readiness Probe:** [http://localhost:8000/health/ready](http://localhost:8000/health/ready)
 - **Backend Liveness Probe:** [http://localhost:8000/health/live](http://localhost:8000/health/live)
-
-To view backend startup logs:
-```sh
-docker compose logs backend | grep -E "Demo reference date|Example goal"
-```
-
-To stop the services while preserving the database volume:
-```sh
-docker compose down
-```
 
 ---
 
@@ -212,24 +248,46 @@ Click the **Stop Run** button on any in-flight or waiting run.
 
 ---
 
-## Key Design Decisions & Trade-Offs
+## Design Decisions
 
-| Decision | Choice | Rationale & Trade-Off |
+| Decision | Choice | Rationale |
 | :--- | :--- | :--- |
-| **Agent Orchestration** | Native Tool Loop (No heavy framework) | **Why:** Full control over step limits, token budgets, execution timeouts, and pause/resume transactions. Easier to debug and explain in live interviews than opaque framework graphs.<br>**Trade-off:** Must hand-craft continuation payload tracking and resume logic. |
-| **Browser Transport** | SSE (`ReadableStream`) + HTTP POST | **Why:** Server-Sent Events provide natural, lightweight one-way streaming for text and tool events. Reconnects via `Last-Event-ID` or `?after=N` prevent event loss. Commands (Approve, Stop) remain explicit HTTP POST requests.<br>**Trade-off:** Client must handle sequence deduplication and gap reconciliation. |
-| **State & Persistence** | PostgreSQL as Source of Truth | **Why:** Browser refresh, container restarts, and pending approvals survive without in-memory dependency. Relational foreign keys prevent orphan calls or decisions.<br>**Trade-off:** Every event and state change requires a database transaction. |
-| **Execution Ownership** | Single-Process Lifespan Worker | **Why:** Simplifies Docker Compose local deployment with zero external task broker (RabbitMQ/Redis) overhead. PostgreSQL advisory locks ensure single-worker ownership.<br>**Trade-off:** Concurrent runs execute serially in the queue rather than in parallel across multiple workers. |
-| **Simulated Ledger** | Idempotent PostgreSQL Table | **Why:** Safe, realistic demonstration of financial write actions with integer-cent precision (`amount_minor`) and idempotency constraints (`order_id`, `policy_version`).<br>**Trade-off:** Does not integrate with third-party payment APIs like Stripe. |
+| **Agent Orchestration** | Native Async Tool Loop (No heavy framework) | Built directly with Python 3.12 async generators and Pydantic v2 schemas. Avoids opaque framework abstractions (e.g. LangChain, CrewAI), providing full observability over continuation contexts, step limits, token budgets, and pause/resume transactions. |
+| **State Persistence** | PostgreSQL 17 as Single Source of Truth | Every state transition (`queued` $\to$ `running` $\to$ `awaiting_approval` $\to$ `completed`/`failed`/`cancelled`), message transcript, tool call, and monotonic event is durably committed before dispatching. Runs survive container crashes and browser reloads without in-memory dependency. |
+| **Browser Transport** | Server-Sent Events (SSE) + HTTP POST | One-way SSE stream for real-time text deltas and tool lifecycle telemetry. Reconnects via `Last-Event-ID` or `?after=N` replay committed events from the database. Explicit user actions (Approve, Reject, Stop) use standard HTTP POST requests. |
+| **Network Architecture** | Same-Origin Next.js Reverse Proxy (`/api/*`) | Direct browser-to-backend requests across ports (`:8000` vs `:3000`) encounter CORS preflight and private-network permission blocks. Next.js App Router catch-all route forwards requests server-to-server to `API_INTERNAL_URL` (`http://backend:8000`) with unbuffered streaming. |
+| **Safety Guardrail** | Human-in-the-Loop Financial Boundary | Write actions (`issue_refund`) cannot execute autonomously. When proposed, the agent loop pauses, commits a pending approval record, and yields the worker. Execution only resumes after a human operator explicitly approves or rejects the action with a mandatory reason. |
+| **Output Presentation** | Structured Markdown & Dual-Mode Viewer | Email drafts follow structured Markdown formats with headers (`## **Draft Email N**`), metadata tags (`**To:**`, `**Subject:**`), horizontal dividers (`---`), and summary callouts. The console provides an interactive toggle between **Formatted View** and **Raw Markdown** with 1-click clipboard copy. |
 
 ---
 
-## Known Gaps & Future Work
+## Technical Trade-offs
 
-1. **Distributed Worker Leasing:** The current implementation uses a single-process worker with PostgreSQL row-level locks. For high-throughput cloud deployment, worker queue leasing with heartbeats and horizontal scaling would be added.
-2. **Multi-User Authentication & RBAC:** Currently single-tenant local baseline. Adding JWT/OIDC authentication and role-based permissions (Operator vs Approver) is the natural next step.
-3. **Policy Retrieval Scaling:** Currently deterministic keyword search over 8 markdown documents. For hundreds of policy manuals, hybrid vector embedding search (pgvector) would replace keyword search.
-4. **Third-Party Integrations:** Connect simulated ledger writes to live payment providers (Stripe/Adyen) and email drafts to SendGrid/Postmark behind customer-facing confirmation.
+| Area | Approach Chosen | Trade-off & Compromise |
+| :--- | :--- | :--- |
+| **Worker Architecture** | Single-Process Lifespan Worker with PostgreSQL Locks | Eliminates external task broker dependencies (Redis, RabbitMQ, Celery), making local startup instant and reliable. However, multiple queued runs are processed sequentially rather than distributed across parallel worker nodes. |
+| **Streaming Protocol** | Server-Sent Events (SSE) instead of WebSockets | SSE is simpler, HTTP/2-friendly, cacheable, and features native browser reconnection. However, it is unidirectional; commands require separate HTTP POST requests instead of duplex messaging over a single socket. |
+| **Currency Arithmetic** | Integer Cents (`amount_minor`) instead of Float | All calculations ($R_{\text{cents}} = \min(\lfloor A_{\text{cents}} \times 0.10 + 0.5 \rfloor, 10000)$) use integer cents and `ROUND_HALF_UP`. Eliminates IEEE-754 floating-point precision bugs; requires explicit division by 100 when rendering formatted currency to users. |
+| **Policy Search Engine** | In-Memory BM25 Keyword Search instead of Vector Database | Zero embedding API latency, zero external vector database overhead, and deterministic citations across the 8 bundled markdown policies. However, it does not support semantic paraphrase matching for thousands of unstructured documents. |
+| **Time Management** | Pinned Reference Date (`2026-02-15` UTC) for Demo Seed | Guarantees 100% reproducible test assertions and offline scenario reliability regardless of when tests run. In production mode, reference time defaults to real-time `datetime.now(timezone.utc)`. |
+
+---
+
+## Known Gaps
+
+1. **Horizontal Worker Auto-Scaling:** The worker currently uses an in-process queue loop with PostgreSQL advisory locks. Scaling across multiple container replicas requires distributed queue leasing with worker heartbeat health checks.
+2. **Multi-User Authentication & RBAC:** Currently operates as a single-tenant operations console. Multi-user enterprise deployment requires JWT/OIDC authentication with role separation (e.g., Tier-1 Support Operator vs. Finance Manager).
+3. **Outbound Channel Connectors:** While the system drafts emails and commits simulated ledger entries, outbound email delivery (via SendGrid/AWS SES) and real banking/Stripe transfers are not wired to live external APIs.
+4. **Vector Search for Large Policy Corpora:** Policy retrieval uses BM25 keyword matching suitable for small policy collections; larger corpora require hybrid pgvector indexing.
+
+---
+
+## Future Improvements
+
+1. **Webhook & Collaboration Integrations:** Real-time Slack/Microsoft Teams notifications with interactive approval buttons when runs enter `awaiting_approval`.
+2. **Multi-Agent Separation of Concerns:** Decoupling research (investigating orders/policies) from calculation auditing (verifying mathematical proofs) into two specialized collaborating subagents.
+3. **Live Payment Gateway Sandboxes:** Connect the simulated ledger to real developer sandboxes (Stripe Test Mode, Adyen Test Platform) for end-to-end payment settlement.
+4. **Automated Continuous Benchmarking:** CI suite running golden operational datasets to detect precision/recall regressions across LLM prompt and model version bumps.
 
 ---
 
