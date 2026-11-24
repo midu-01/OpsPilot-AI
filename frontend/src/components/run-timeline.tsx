@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import MarkdownView from "./markdown-view";
 import type { MessageSnapshot, ToolCallSnapshot, ApprovalSnapshot, RunStatus } from "../lib/api";
 
 interface RunTimelineProps {
@@ -55,7 +56,7 @@ export default function RunTimeline({
             <div className="timeline-item-body">
               {message.text && (
                 <div style={{ marginBottom: attachedCalls.length > 0 ? "14px" : "0" }}>
-                  {message.text}
+                  <MarkdownView content={message.text} />
                 </div>
               )}
 
