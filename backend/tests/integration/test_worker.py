@@ -78,6 +78,23 @@ async def test_leader_preserves_live_work_and_drains_oldest_first(sessions: Sess
     assert provider_names == [("fake", "first-model"), ("fake", "second-model")]
 
 
+async def test_missing_key_is_reported_before_model_execution(sessions: Sessions) -> None:
+    from app.agent.runtime import ProviderConfigurationError
+
+    async with sessions() as session:
+        created = await create_run(session, "Missing provider key")
+
+    def unavailable(name: str, model: str) -> tuple[LLMProvider, None]:
+        raise ProviderConfigurationError("ANTHROPIC_API_KEY is missing. Set it in the server environment.")
+
+    async with worker(sessions, unavailable):
+        failed = await wait_status(sessions, created.id, RunStatus.failed)
+    assert failed.step_count == 0
+    assert failed.model_calls == []
+    assert failed.events[-1].payload["code"] == "PROVIDER_CONFIGURATION_ERROR"
+    assert "ANTHROPIC_API_KEY" in str(failed.events[-1].payload["message"])
+
+
 async def test_recovery_preserves_trace_and_pending_approval(sessions: Sessions) -> None:
     async with sessions() as session:
         active = await create_run(session, "Running at crash")
