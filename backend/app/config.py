@@ -1,6 +1,7 @@
 """OpsPilot backend application configuration."""
 
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -17,6 +18,9 @@ from pydantic import (
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+ENV_FILES = (BACKEND_ROOT.parent / ".env", BACKEND_ROOT / ".env")
+
 
 class ModelRates(BaseModel):
     """USD per million tokens, keyed by the provider and model in MODEL_PRICES."""
@@ -29,7 +33,9 @@ class ModelRates(BaseModel):
 class Settings(BaseSettings):
     """Environment settings shared by the API and its database pool."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_ignore_empty=True, extra="ignore", hide_input_in_errors=True)
+    model_config = SettingsConfigDict(
+        env_file=ENV_FILES, env_ignore_empty=True, extra="ignore", hide_input_in_errors=True
+    )
 
     database_url: Annotated[PostgresDsn, UrlConstraints(allowed_schemes=["postgresql+asyncpg"], host_required=True)] = (
         PostgresDsn("postgresql+asyncpg://localhost:5432/opspilot")
@@ -39,6 +45,7 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-haiku-4-5-20251001"
     groq_api_key: SecretStr = SecretStr("")
     groq_model: str = "openai/gpt-oss-20b"
+    fake_model: Literal["scripted", "scenario"] = "scripted"
     model_prices: dict[str, ModelRates] = Field(default_factory=dict)
     business_timezone: str = "UTC"
     max_agent_steps: PositiveInt = 20
@@ -52,7 +59,7 @@ class Settings(BaseSettings):
         return {
             "groq": self.groq_model,
             "anthropic": self.anthropic_model,
-            "fake": "scripted",
+            "fake": self.fake_model,
         }[self.llm_provider]
 
     @field_validator("business_timezone")

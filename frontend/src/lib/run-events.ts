@@ -39,8 +39,9 @@ export interface RunState {
 export function createInitialRunState(snapshot: RunSnapshot): RunState {
   const allToolCalls: ToolCallSnapshot[] = [];
   const seenCallIds = new Set<string>();
+  const messages = structuredClone(snapshot.messages);
 
-  for (const message of snapshot.messages) {
+  for (const message of messages) {
     for (const call of message.tool_calls) {
       if (!seenCallIds.has(call.id)) {
         seenCallIds.add(call.id);
@@ -68,23 +69,28 @@ export function createInitialRunState(snapshot: RunSnapshot): RunState {
     active_elapsed_ms: snapshot.active_elapsed_ms,
     max_agent_steps: snapshot.max_agent_steps,
     max_tool_calls: snapshot.max_tool_calls,
-    messages: [...snapshot.messages],
+    messages,
     tool_calls: allToolCalls,
-    approvals: [...snapshot.approvals],
-    pending_approval: snapshot.pending_approval ?? null,
+    approvals: structuredClone(snapshot.approvals),
+    pending_approval: snapshot.pending_approval ? structuredClone(snapshot.pending_approval) : null,
     cursor: snapshot.snapshot_cursor,
     seen_sequences: seenSequences,
     has_sequence_gap: false,
+    error: snapshot.events.findLast(event => event.type === "run.failed")?.payload.message as string | undefined,
   };
 }
 
-export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
-  // Deduplicate by sequence
-  if (state.seen_sequences.includes(event.sequence) || event.sequence <= state.cursor) {
-    return state;
-  }
+export type RunAction = RunEvent | { snapshot: RunSnapshot };
 
-  const hasGap = event.sequence > state.cursor + 1;
+export function reduceRunState(state: RunState, action: RunAction): RunState {
+  return "snapshot" in action ? createInitialRunState(action.snapshot) : reduceRunEvent(state, action);
+}
+
+export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
+  // Never advance past a missing event; a fresh snapshot repairs the gap.
+  if (event.run_id !== state.id || event.sequence <= state.cursor) return state;
+  if (event.sequence !== state.cursor + 1) return { ...state, has_sequence_gap: true };
+
   const nextSeen = [...state.seen_sequences, event.sequence];
   const nextCursor = Math.max(state.cursor, event.sequence);
 
@@ -97,11 +103,12 @@ export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
   let nextEstimatedCost = state.estimated_cost_usd;
   let nextError = state.error;
 
-  const messages = state.messages.map((m) => ({
-    ...m,
-    tool_calls: [...m.tool_calls],
+  const toolCalls = state.tool_calls.map(call => ({ ...call }));
+  const callsById = new Map(toolCalls.map(call => [call.id, call]));
+  const messages = state.messages.map((message) => ({
+    ...message,
+    tool_calls: message.tool_calls.map(call => callsById.get(call.id) ?? { ...call }),
   }));
-  const toolCalls = [...state.tool_calls];
   const approvals = [...state.approvals];
   let pendingApproval = state.pending_approval;
 
@@ -147,8 +154,11 @@ export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
           ...messages[msgIndex],
           text: payload.text !== undefined ? (payload.text as string | null) : messages[msgIndex].text,
         };
+      } else {
+        messages.push({ id: messageId, index: messages.length, role: "assistant",
+          text: payload.text as string | null, tool_calls: [], created_at: event.occurred_at });
       }
-      nextStepCount = Math.max(nextStepCount, nextStepCount + 1);
+      nextStepCount += 1;
       break;
     }
 
@@ -315,6 +325,6 @@ export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
     pending_approval: pendingApproval,
     cursor: nextCursor,
     seen_sequences: nextSeen,
-    has_sequence_gap: state.has_sequence_gap || hasGap,
+    has_sequence_gap: false,
   };
 }

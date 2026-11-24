@@ -85,7 +85,8 @@ test("reduceRunEvent detects sequence gaps", () => {
 
   const nextState = reduceRunEvent(state, gapEvent);
   assert.equal(nextState.has_sequence_gap, true);
-  assert.equal(nextState.cursor, 3);
+  assert.equal(nextState.cursor, 1);
+  assert.equal(nextState.messages.some((message) => message.id === "msg-asst-1"), false);
 });
 
 test("reduceRunEvent accumulates text deltas into assistant messages", () => {
@@ -225,4 +226,39 @@ test("reduceRunEvent handles terminal events", () => {
 
   state = reduceRunEvent(state, compEvent);
   assert.equal(state.status, "completed");
+});
+
+test("message completion restores output even when its delta was not in the snapshot", () => {
+  const state = createInitialRunState(MOCK_SNAPSHOT);
+  const completed: RunEvent = {
+    schema_version: 1, run_id: "run-123", sequence: 2, type: "message.completed",
+    occurred_at: "2026-02-15T12:00:01Z",
+    payload: { message_id: "new-message", status: "completed", text: "Final email drafts" },
+  };
+  const next = reduceRunEvent(state, completed);
+  assert.equal(next.messages.find(message => message.id === "new-message")?.text, "Final email drafts");
+});
+
+test("the tool lifecycle does not mutate the snapshot or prior reducer state", () => {
+  const initial = createInitialRunState(MOCK_SNAPSHOT);
+  const requested = reduceRunEvent(initial, {
+    schema_version: 1, run_id: "run-123", sequence: 2, type: "tool.requested",
+    occurred_at: "2026-02-15T12:00:01Z",
+    payload: { tool_call_id: "tool-1", name: "query_orders", provider_call_id: "p1", arguments: {} },
+  });
+  const started = reduceRunEvent(requested, {
+    schema_version: 1, run_id: "run-123", sequence: 3, type: "tool.started",
+    occurred_at: "2026-02-15T12:00:02Z", payload: { tool_call_id: "tool-1" },
+  });
+  assert.equal(requested.tool_calls[0].status, "requested");
+  assert.equal(started.tool_calls[0].status, "running");
+});
+
+test("a failed persisted snapshot includes the stored failure explanation", () => {
+  const snapshot: RunSnapshot = { ...MOCK_SNAPSHOT, status: "failed", snapshot_cursor: 2, events: [
+    ...MOCK_SNAPSHOT.events,
+    { schema_version: 1, run_id: "run-123", sequence: 2, type: "run.failed", occurred_at: "2026-02-15T12:00:01Z",
+      payload: { code: "PROVIDER_CONFIGURATION_ERROR", message: "ANTHROPIC_API_KEY is missing" } },
+  ] };
+  assert.equal(createInitialRunState(snapshot).error, "ANTHROPIC_API_KEY is missing");
 });
