@@ -35,7 +35,15 @@ async def test_scenario_provider_draft_turn_progression() -> None:
             role="tool",
             name="date_math",
             tool_call_id="call-date-draft",
-            content=json.dumps({"ok": True, "data": {"start": "2026-01-01", "end": "2026-02-01"}}),
+            content=json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "shipped_after": "2026-01-01T00:00:00+00:00",
+                        "shipped_before": "2026-02-01T00:00:00+00:00",
+                    },
+                }
+            ),
         )
     )
 
@@ -44,8 +52,8 @@ async def test_scenario_provider_draft_turn_progression() -> None:
     assert len(events_t2) == 2
     assert events_t2[0].type == ModelEventType.tool_call
     assert events_t2[0].tool_name == "query_orders"
-    assert events_t2[0].arguments["start"] == "2026-01-01"
-    assert events_t2[0].arguments["end"] == "2026-02-01"
+    assert events_t2[0].arguments["shipped_after"] == "2026-01-01T00:00:00+00:00"
+    assert events_t2[0].arguments["shipped_before"] == "2026-02-01T00:00:00+00:00"
 
     # Simulate query_orders result
     messages.append(
@@ -59,7 +67,7 @@ async def test_scenario_provider_draft_turn_progression() -> None:
             role="tool",
             name="query_orders",
             tool_call_id="call-query-draft",
-            content=json.dumps({"ok": True, "data": [{"id": "ORD-1001"}, {"id": "ORD-1004"}]}),
+            content=json.dumps({"ok": True, "data": {"orders": [{"id": "ORD-1001"}, {"id": "ORD-1004"}], "count": 2}}),
         )
     )
 
@@ -129,7 +137,7 @@ async def test_scenario_provider_approval_resume() -> None:
     e3 = [e async for e in provider.stream_turn(messages, [])]
     assert e3[0].tool_name == "issue_refund"
     assert e3[0].arguments["order_id"] == "ORD-1001"
-    assert e3[0].arguments["amount_minor"] == 6250
+    assert "amount_minor" not in e3[0].arguments
 
     # Simulate approval resumption in a NEW provider instance (as done by a new worker claim)
     new_provider = ScenarioProvider()
@@ -168,7 +176,9 @@ async def test_scenario_provider_rejection_resume() -> None:
         )
     )
 
-    # Request refund
+    # Request policy evidence before proposing the refund.
+    _ = [e async for e in provider.stream_turn(messages, [])]
+    messages.append(ProviderMessage(role="tool", name="search_policies", content='{"ok":true,"data":{"matches":[]}}'))
     _ = [e async for e in provider.stream_turn(messages, [])]
     messages.append(ProviderMessage(role="assistant", tool_calls=[{"id": "c2", "name": "issue_refund"}]))
     messages.append(

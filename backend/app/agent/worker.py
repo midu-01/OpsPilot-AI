@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.agent.contracts import LLMProvider
 from app.agent.loop import execute_run, save_tool_result
-from app.agent.runtime import resolve_run_provider
+from app.agent.runtime import ProviderConfigurationError, resolve_run_provider
 from app.agent.usage import Pricing, record_usage
 from app.models import Message, ModelCall, Run, ToolCall
 from app.runs.schemas import EventType, RunStatus, ToolError, ToolFailure
@@ -113,13 +113,12 @@ async def consume(sessions: Sessions, resolve: Resolver, poll_interval: float) -
         run_id, name, model = claimed
         try:
             provider, pricing = resolve(name, model)
-        except Exception:
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, ProviderConfigurationError) else "The configured model is unavailable."
             logger.warning("Provider configuration unavailable", extra={"run_id": str(run_id)})
             async with sessions.begin() as session:
                 run = await session.get_one(Run, run_id, with_for_update=True)
-                await finish_interrupted(
-                    session, run, "PROVIDER_CONFIGURATION_ERROR", "The configured model is unavailable."
-                )
+                await finish_interrupted(session, run, "PROVIDER_CONFIGURATION_ERROR", detail)
             continue
         await execute_run(sessions, run_id, provider, pricing)
 

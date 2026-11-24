@@ -35,7 +35,10 @@ def resolve_run_provider(provider_name: str, model: str) -> tuple[LLMProvider, P
         raise ProviderConfigurationError("Unsupported provider.")
     base_url, secret = endpoints[provider_name]
     if not secret.get_secret_value().strip():
-        raise ProviderConfigurationError("Missing credential for the selected provider.")
+        key_name = "ANTHROPIC_API_KEY" if provider_name == "anthropic" else "GROQ_API_KEY"
+        raise ProviderConfigurationError(
+            f"{key_name} is missing. Set it in the server environment or project .env, then restart the backend."
+        )
     rates = settings.model_prices.get(f"{provider_name}/{model}")
     pricing = Pricing(rates.input_usd, rates.output_usd, rates.cached_input_usd) if rates else None
     return make_provider(provider_name, model, secret.get_secret_value(), base_url), pricing

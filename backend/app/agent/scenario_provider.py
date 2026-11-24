@@ -1,14 +1,19 @@
 """Deterministic scenario-driven provider for keyless testing and offline demos."""
 
 import json
+import re
 from collections.abc import AsyncIterator
+from datetime import date
 from typing import Any
 
 from app.agent.contracts import LLMProvider, ModelEvent, ModelEventType, ProviderMessage, ToolDefinition
 
 
 class ScenarioProvider(LLMProvider):
-    """Stateless deterministic provider that resolves turns from message history."""
+    """Deterministic fixture using saved observations; it never executes tools itself."""
+
+    def __init__(self, reference_date: date = date(2026, 2, 15)) -> None:
+        self.reference_date = reference_date
 
     async def stream_turn(
         self, messages: list[ProviderMessage], tools: list[ToolDefinition]
@@ -33,60 +38,23 @@ class ScenarioProvider(LLMProvider):
         has_policy = "search_policies" in tool_observations
         has_refund = "issue_refund" in tool_observations
 
-        # Scenario A: Rejection flow (mentions ORD-1006 or reject)
-        if "ord-1006" in goal or "reject" in goal:
+        requested_order = re.search(r"\bord-\d+\b", goal)
+        writes_requested = "draft" not in goal and any(word in goal for word in ("issue", "propose", "refund"))
+        if requested_order and writes_requested:
+            order_id = requested_order.group().upper()
             if not has_query:
                 yield ModelEvent(
                     ModelEventType.tool_call,
-                    call_id="call-ord-1006",
+                    call_id="call-order-evidence",
                     tool_name="query_orders",
-                    arguments={"order_id": "ORD-1006"},
-                )
-                yield ModelEvent(ModelEventType.turn_complete)
-                return
-            if not has_refund:
-                yield ModelEvent(
-                    ModelEventType.tool_call,
-                    call_id="call-ref-1006",
-                    tool_name="issue_refund",
-                    arguments={
-                        "order_id": "ORD-1006",
-                        "amount_minor": 8450,
-                        "reason": "Late shipment policy v1 refund of 10%",
-                    },
-                )
-                yield ModelEvent(ModelEventType.turn_complete)
-                return
-
-            # Observation received after decision
-            obs = tool_observations["issue_refund"]
-            reason = obs.get("error", {}).get("message", "Customer requested store credit.")
-            yield ModelEvent(
-                ModelEventType.text_delta,
-                text=(
-                    f"The refund proposal for order ORD-1006 was rejected by human operator ({reason}). "
-                    "No refund was issued to the simulated ledger."
-                ),
-            )
-            yield ModelEvent(ModelEventType.usage, input_tokens=180, output_tokens=45)
-            yield ModelEvent(ModelEventType.turn_complete)
-            return
-
-        # Scenario B: Explicit Approval flow (mentions ORD-1001, propose, or approval)
-        if "ord-1001" in goal or "propose" in goal or "simulated refund" in goal:
-            if not has_query:
-                yield ModelEvent(
-                    ModelEventType.tool_call,
-                    call_id="call-ord-1001",
-                    tool_name="query_orders",
-                    arguments={"order_id": "ORD-1001"},
+                    arguments={"sort_by": "id", "limit": 100},
                 )
                 yield ModelEvent(ModelEventType.turn_complete)
                 return
             if not has_policy:
                 yield ModelEvent(
                     ModelEventType.tool_call,
-                    call_id="call-pol-1001",
+                    call_id="call-refund-policy",
                     tool_name="search_policies",
                     arguments={"query": "late shipment refund"},
                 )
@@ -95,27 +63,24 @@ class ScenarioProvider(LLMProvider):
             if not has_refund:
                 yield ModelEvent(
                     ModelEventType.tool_call,
-                    call_id="call-ref-1001",
+                    call_id="call-refund-proposal",
                     tool_name="issue_refund",
-                    arguments={
-                        "order_id": "ORD-1001",
-                        "amount_minor": 6250,
-                        "reason": "Late shipment policy v1 refund of 10% on $625.00 order",
-                    },
+                    arguments={"order_id": order_id, "reason": "Review the late shipment under policy v1"},
                 )
                 yield ModelEvent(ModelEventType.turn_complete)
                 return
-
-            # Observation received after approval
-            obs = tool_observations["issue_refund"]
-            refund_id = obs.get("data", {}).get("refund_id", "REF-SIMULATED")
-            yield ModelEvent(
-                ModelEventType.text_delta,
-                text=(
-                    f"The simulated refund for order ORD-1001 was approved and committed (ID: {refund_id}). "
-                    "A refund of $62.50 USD has been recorded in the ledger."
-                ),
-            )
+            observed = tool_observations["issue_refund"]
+            if observed.get("ok") is True:
+                data = observed.get("data", {})
+                text = (
+                    f"The simulated refund for {data.get('order_id', order_id)} was approved and committed "
+                    f"(ID: {data.get('refund_id')}). ${int(data['amount_minor']) / 100:.2f} "
+                    f"{data.get('currency', 'USD')} was recorded in the simulated ledger."
+                )
+            else:
+                error = observed.get("error", {})
+                text = f"No refund was issued for {order_id}: {error.get('message', 'The refund request failed.')}"
+            yield ModelEvent(ModelEventType.text_delta, text=text)
             yield ModelEvent(ModelEventType.usage, input_tokens=210, output_tokens=55)
             yield ModelEvent(ModelEventType.turn_complete)
             return
@@ -127,7 +92,7 @@ class ScenarioProvider(LLMProvider):
                     ModelEventType.tool_call,
                     call_id="call-date-zero",
                     tool_name="date_math",
-                    arguments={"operation": "previous_month"},
+                    arguments={"operation": "previous_month", "reference_date": self.reference_date.isoformat()},
                 )
                 yield ModelEvent(ModelEventType.turn_complete)
                 return
@@ -155,7 +120,7 @@ class ScenarioProvider(LLMProvider):
                 ModelEventType.tool_call,
                 call_id="call-date-draft",
                 tool_name="date_math",
-                arguments={"operation": "previous_month"},
+                arguments={"operation": "previous_month", "reference_date": self.reference_date.isoformat()},
             )
             yield ModelEvent(ModelEventType.turn_complete)
             return
@@ -163,16 +128,17 @@ class ScenarioProvider(LLMProvider):
         if not has_query:
             date_obs = tool_observations.get("date_math", {})
             date_data = date_obs.get("data", {}) if date_obs.get("ok") else {}
-            start = date_data.get("start")
-            end = date_data.get("end")
+            start = date_data.get("shipped_after")
+            end = date_data.get("shipped_before")
             query_args: dict[str, Any] = {
                 "min_amount_minor": 50000,
                 "late_only": True,
                 "status": "shipped",
+                "limit": 100,
             }
             if start and end:
-                query_args["start"] = start
-                query_args["end"] = end
+                query_args["shipped_after"] = start
+                query_args["shipped_before"] = end
 
             yield ModelEvent(
                 ModelEventType.tool_call,
@@ -195,19 +161,20 @@ class ScenarioProvider(LLMProvider):
 
         # Final turn: compose drafts
         orders_obs = tool_observations.get("query_orders", {})
-        orders_list = orders_obs.get("data", []) if orders_obs.get("ok") else []
-        order_ids = [str(o["id"]) for o in orders_list if isinstance(o, dict) and o.get("id")]
-        orders_summary = ", ".join(order_ids[:3]) if order_ids else "qualifying orders"
-
+        orders_data = orders_obs.get("data", {}) if orders_obs.get("ok") else {}
+        orders_list = orders_data.get("orders", [])
+        order_ids = [str(order["id"]) for order in orders_list if isinstance(order, dict) and order.get("id")]
+        drafts = [
+            f"Subject: Shipping delay for {order_id}\nDear Customer, we apologize for the shipping delay "
+            f"on order {order_id}. Your refund eligibility can be reviewed under the late-shipment policy."
+            for order_id in order_ids
+        ]
         draft_content = (
-            f"Found {len(order_ids)} orders over $500 that shipped late last month ({orders_summary}).\n\n"
-            "Here are the drafted refund notification emails in accordance with policy EMAIL-01:\n\n"
-            "Subject: Apology & 10% Refund for Order Delay\n"
-            "Dear Customer,\n\n"
-            "We apologize for the delay in shipping your order. As promised by our Late Shipment Policy, "
-            "a 10% refund draft has been calculated for your order.\n\n"
-            "Sincerely,\nOpsPilot Operations Team"
+            f"Found {len(order_ids)} qualifying orders. Email drafts follow policy EMAIL-01; "
+            "no email was sent and no refund was issued.\n\n" + "\n\n".join(drafts)
         )
+        if not order_ids:
+            draft_content = "No matching orders were found. No email drafts or refunds were created."
 
         yield ModelEvent(ModelEventType.text_delta, text=draft_content)
         yield ModelEvent(ModelEventType.usage, input_tokens=320, output_tokens=110)

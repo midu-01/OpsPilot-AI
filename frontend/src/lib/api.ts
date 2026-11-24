@@ -11,21 +11,14 @@ export type ApprovalDecision = "approve" | "reject";
 
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled";
 
-export type EventType =
-  | "run.queued"
-  | "run.started"
-  | "message.delta"
-  | "message.completed"
-  | "tool.requested"
-  | "tool.started"
-  | "tool.completed"
-  | "tool.failed"
-  | "approval.required"
-  | "approval.decided"
-  | "usage.updated"
-  | "run.completed"
-  | "run.failed"
-  | "run.cancelled";
+export const RUN_EVENT_TYPES = [
+  "run.queued", "run.started", "message.delta", "message.completed",
+  "tool.requested", "tool.started", "tool.completed", "tool.failed",
+  "approval.required", "approval.decided", "usage.updated",
+  "run.completed", "run.failed", "run.cancelled",
+] as const;
+
+export type EventType = (typeof RUN_EVENT_TYPES)[number];
 
 export interface RunEvent {
   schema_version: 1;

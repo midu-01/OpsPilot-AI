@@ -19,7 +19,7 @@ const EXAMPLE_PROMPTS = [
     tag: "Requires Approval",
     tagClass: "badge-tag-approval",
     prompt:
-      "Find order ORD-002 that shipped late last month and propose a simulated refund under policy.",
+      "Check the late-shipment policy and propose an eligible simulated refund for ORD-1001. Wait for my approval.",
     description:
       "Calculates refund amount and creates an approval card. Waits for your approval before writing to the ledger.",
   },

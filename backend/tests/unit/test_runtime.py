@@ -31,6 +31,19 @@ def test_unsupported_provider_raises_error() -> None:
         runtime.resolve_run_provider("unsupported_provider", "some-model")
 
 
+@pytest.mark.parametrize(
+    ("provider", "model", "key_name"),
+    [("anthropic", "claude-haiku-4-5-20251001", "ANTHROPIC_API_KEY"), ("groq", "openai/gpt-oss-20b", "GROQ_API_KEY")],
+)
+def test_missing_credentials_identify_the_required_server_setting(
+    monkeypatch: pytest.MonkeyPatch, provider: str, model: str, key_name: str
+) -> None:
+    config = Settings(_env_file=None, anthropic_api_key="", groq_api_key="")
+    monkeypatch.setattr(runtime, "settings", config)
+    with pytest.raises(runtime.ProviderConfigurationError, match=key_name):
+        runtime.resolve_run_provider(provider, model)
+
+
 async def test_fake_runs_have_independent_scripts() -> None:
     for _ in range(2):
         fake, _ = runtime.resolve_run_provider("fake", "scripted")
