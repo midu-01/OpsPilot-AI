@@ -3,7 +3,7 @@
 import json
 import re
 from collections.abc import AsyncIterator
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from app.agent.contracts import LLMProvider, ModelEvent, ModelEventType, ProviderMessage, ToolDefinition
@@ -163,17 +163,52 @@ class ScenarioProvider(LLMProvider):
         orders_obs = tool_observations.get("query_orders", {})
         orders_data = orders_obs.get("data", {}) if orders_obs.get("ok") else {}
         orders_list = orders_data.get("orders", [])
-        order_ids = [str(order["id"]) for order in orders_list if isinstance(order, dict) and order.get("id")]
-        drafts = [
-            f"Subject: Shipping delay for {order_id}\nDear Customer, we apologize for the shipping delay "
-            f"on order {order_id}. Your refund eligibility can be reviewed under the late-shipment policy."
-            for order_id in order_ids
-        ]
-        draft_content = (
-            f"Found {len(order_ids)} qualifying orders. Email drafts follow policy EMAIL-01; "
-            "no email was sent and no refund was issued.\n\n" + "\n\n".join(drafts)
-        )
-        if not order_ids:
+        if orders_list:
+            draft_blocks: list[str] = []
+            for i, order in enumerate(orders_list, start=1):
+                order_id = str(order.get("id", f"ORD-{1000 + i}"))
+                customer_name = str(order.get("customer_name", f"Demo Customer {i:02d}"))
+                customer_email = str(order.get("customer_email", f"customer{i:02d}@example.test"))
+                amount_minor = order.get("amount_minor", 62500)
+                amount_usd = f"{amount_minor / 100:.2f}"
+
+                promised_str = str(order.get("promised_ship_at", ""))
+                shipped_str = str(order.get("shipped_at", ""))
+                try:
+                    promised_dt = datetime.fromisoformat(promised_str)
+                    shipped_dt = datetime.fromisoformat(shipped_str)
+                    delay_days = max(1, (shipped_dt.date() - promised_dt.date()).days)
+                    promised_fmt = promised_dt.strftime("%B %d, %Y")
+                    shipped_fmt = shipped_dt.strftime("%B %d, %Y")
+                except Exception:
+                    delay_days = 2
+                    promised_fmt = "September 29, 2026"
+                    shipped_fmt = "October 1, 2026"
+
+                draft_blocks.append(
+                    f"## **Draft Email {i}**\n\n"
+                    f"**To:** {customer_email}  \n"
+                    f"**Subject:** Refund for Late Delivery - Order {order_id}\n\n"
+                    f"Dear {customer_name},\n\n"
+                    f"We sincerely apologize for the delayed delivery of your order {order_id} (USD ${amount_usd}). "
+                    f"Your order was promised to ship by {promised_fmt}, but unfortunately shipped on {shipped_fmt} – "
+                    f"{delay_days} days late.\n\n"
+                    "As a gesture of goodwill and in accordance with our late-shipment policy, "
+                    "we would like to issue you a refund for this inconvenience.\n\n"
+                    "Please let us know if you have any questions.\n\n"
+                    "Best regards,  \nOperations Team"
+                )
+
+            draft_content = (
+                f"Perfect! I found {len(orders_list)} orders over $500 that shipped late last month. "
+                "Following policy EMAIL-01, here are the draft refund emails for each:\n\n---\n\n"
+                + "\n\n---\n\n".join(draft_blocks)
+                + "\n\n---\n\n"
+                f"**Summary:** Found **{len(orders_list)} late orders over $500**, "
+                "ranging from $625.00 to $845.05, with delays of 2-3 days each. "
+                "All emails are ready for review and sending."
+            )
+        else:
             draft_content = "No matching orders were found. No email drafts or refunds were created."
 
         yield ModelEvent(ModelEventType.text_delta, text=draft_content)

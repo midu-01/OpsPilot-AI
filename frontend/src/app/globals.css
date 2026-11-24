@@ -534,4 +534,180 @@ table.runs-table tr:hover td {
   }
 }
 
+/* Markdown & Email Draft Formatting */
+.markdown-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.markdown-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+  flex-wrap: wrap;
+}
+.markdown-toggle-group {
+  display: inline-flex;
+  background: #edf3f0;
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+.btn-toggle {
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-toggle:hover {
+  color: var(--color-text);
+}
+.btn-toggle.active {
+  background: var(--color-surface);
+  color: var(--color-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+.btn-copy {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-copy:hover {
+  background: #f1f6f4;
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+.markdown-formatted {
+  white-space: normal;
+  line-height: 1.6;
+  color: var(--color-text);
+}
+.markdown-h1 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  margin: 16px 0 8px;
+}
+.markdown-h2 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  margin: 20px 0 8px;
+}
+.draft-email-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-primary);
+  border-left: 3px solid var(--color-accent);
+  padding-left: 8px;
+}
+.email-badge-icon {
+  font-size: 1rem;
+  color: var(--color-accent);
+}
+.markdown-h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 14px 0 6px;
+}
+.markdown-p {
+  margin: 0 0 12px;
+}
+.markdown-hr {
+  border: none;
+  border-top: 1px solid var(--color-border);
+  margin: 20px 0;
+}
+.markdown-ul {
+  margin: 0 0 12px 20px;
+  padding: 0;
+}
+.inline-code {
+  background: #edf3f0;
+  color: var(--color-primary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.88em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.email-meta-card {
+  background: #f8fbfa;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 10px 0 12px;
+}
+.email-meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 0.92rem;
+}
+.email-meta-row:last-child {
+  margin-bottom: 0;
+}
+.email-meta-label {
+  font-weight: 700;
+  color: var(--color-primary);
+  min-width: 60px;
+}
+.email-meta-value {
+  color: var(--color-text);
+  font-weight: 500;
+}
+.email-meta-subline {
+  margin-top: 6px;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+.markdown-summary-box {
+  background: var(--color-success-bg);
+  border: 1px solid var(--color-success-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-top: 20px;
+}
+.summary-title {
+  font-weight: 700;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-success);
+  margin-bottom: 6px;
+}
+.summary-body {
+  font-size: 0.95rem;
+  color: var(--color-text);
+  line-height: 1.5;
+}
+.raw-markdown-block {
+  background: #192b27;
+  color: #e5f2ed;
+  padding: 14px;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
 
