@@ -1,34 +1,46 @@
-import type { Metadata } from "next";
-import Link from "next/link";
+import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
+import { cookies } from "next/headers";
+import { GeistMono } from "geist/font/mono";
+import { GeistSans } from "geist/font/sans";
+import { AppHeader } from "@/components/shell/app-header";
+import { THEME_COOKIE, parseThemePreference } from "@/lib/theme";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "OpsPilot AI | Agent Run Console",
-  description: "Autonomous operations copilot with human-in-the-loop approval",
+  title: { default: "OpsPilot", template: "%s · OpsPilot" },
+  description: "Agent run console: watch an operations agent work and approve risky actions.",
 };
 
-export default function RootLayout({ children }: { children: ReactNode }) {
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#fafafa" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0b" },
+  ],
+};
+
+/**
+ * Server Component. Reading the theme cookie here lets the first HTML byte carry the
+ * right theme, with no inline script. Every page renders per request anyway, because
+ * each one shows live backend data.
+ */
+export default async function RootLayout({ children }: { children: ReactNode }) {
+  const theme = parseThemePreference((await cookies()).get(THEME_COOKIE)?.value);
   return (
-    <html lang="en">
-      <body>
-        <header className="app-header" role="banner">
-          <Link href="/" className="brand" aria-label="OpsPilot AI Home">
-            <span className="brand-mark" aria-hidden="true">O</span>
-            <span>OpsPilot AI</span>
-          </Link>
-          <nav className="nav-links" aria-label="Main Navigation">
-            <Link href="/" className="nav-link">
-              New Run
-            </Link>
-            <Link href="/runs" className="nav-link">
-              Runs History
-            </Link>
-          </nav>
-        </header>
-        <main className="container">{children}</main>
+    <html
+      lang="en"
+      data-theme={theme === "system" ? undefined : theme}
+      className={`${GeistSans.variable} ${GeistMono.variable}`}
+    >
+      <body className="min-h-dvh bg-bg font-sans text-fg antialiased">
+        <a href="#main" className="skip-link">
+          Skip to content
+        </a>
+        <AppHeader theme={theme} />
+        <main id="main" tabIndex={-1} className="mx-auto w-full max-w-[1400px] px-4 py-6 outline-none sm:px-6 sm:py-8">
+          {children}
+        </main>
       </body>
     </html>
   );
 }
-
