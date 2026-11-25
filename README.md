@@ -2,6 +2,12 @@
 
 OpsPilot AI is an operations copilot built with **Next.js 16 (App Router)** and **FastAPI (Python 3.12)** backed by **PostgreSQL 17 with pgvector**. It assists operations teams with automated customer order analysis and policy-governed refund drafting, while placing write actions behind a human approval boundary. Operators sign in, and each account sees only its own runs.
 
+## Live Demo
+
+**Demo video:** _coming soon_
+
+The video walks through signing in, the four demo scenarios (including approving and rejecting a refund), the live trace and run inspector, and replaying past runs from the Runs page.
+
 ---
 
 ## Architecture Diagram & System Overview
