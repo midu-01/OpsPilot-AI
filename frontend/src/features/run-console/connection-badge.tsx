@@ -15,7 +15,8 @@ const CONNECTION: Record<ConnectionState, { label: string; icon: LucideIcon | nu
 export function ConnectionBadge({ connection }: { connection: ConnectionState }) {
   const { label, icon: Icon, className, spin } = CONNECTION[connection];
   return (
-    <span className={cx("inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap", className)}>
+    // A polite status: screen readers hear "Reconnecting…" or "Offline" without losing focus.
+    <span role="status" className={cx("inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap", className)}>
       {Icon ? (
         <Icon aria-hidden className={cx("size-3.5", spin && "motion-safe:animate-spin")} />
       ) : (

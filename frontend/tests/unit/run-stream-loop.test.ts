@@ -37,7 +37,11 @@ function harness(responses: Array<Response | Error>, snapshots: RunSnapshot[], c
     fetchStream: async (url, init) => {
       h.requests.push({ url, lastEventId: new Headers(init.headers).get("Last-Event-ID") });
       const next = responses.shift();
-      if (!next) throw new Error("no more responses");
+      if (!next) {
+        // Out of scripted responses: stop the loop instead of retrying forever.
+        h.controller.abort();
+        throw new DOMException("aborted", "AbortError");
+      }
       if (next instanceof Error) throw next;
       return next;
     },
@@ -48,6 +52,8 @@ function harness(responses: Array<Response | Error>, snapshots: RunSnapshot[], c
     },
     sleep: async (ms) => {
       h.sleeps.push(ms);
+      // A loop that keeps backing off without progress would never end with an instant sleep.
+      if (h.sleeps.length > 20) h.controller.abort();
     },
   };
   return h;
@@ -62,7 +68,7 @@ test("streams from the cursor, applies events in order and stops after the run f
   await runStreamLoop(h.options);
 
   assert.equal(h.requests.length, 1);
-  assert.match(h.requests[0].url, /\/runs\/run-123\/stream\?after=1$/);
+  assert.match(h.requests[0].url, new RegExp(`/runs/${RUN_ID}/stream\\?after=1$`));
   assert.equal(h.requests[0].lastEventId, "1");
   assert.deepEqual(h.events, [2, 3, 4]);
   assert.deepEqual(h.snapshots, [{ cursor: 4, force: false }]); // the final snapshot
@@ -96,12 +102,49 @@ test("204 means finished and caught up: load the final snapshot and stop", async
   assert.equal(h.connections.at(-1), "closed");
 });
 
-test("422 means our cursor is ahead of the run: force the snapshot and restart from it", async () => {
-  const h = harness([new Response("ahead", { status: 422 }), sse([ev(4, "run.completed", {})])], [snapshotAt(3, "running"), snapshotAt(4, "completed")], 7);
+test("422 means our cursor is ahead of the run: force the snapshot, back off, restart from it", async () => {
+  const h = harness(
+    [new Response("ahead", { status: 422 }), sse([ev(4, "run.completed", {})])],
+    [snapshotAt(3, "running"), snapshotAt(3, "running"), snapshotAt(4, "completed")],
+    7,
+  );
   await runStreamLoop(h.options);
   assert.deepEqual(h.snapshots[0], { cursor: 3, force: true });
   assert.match(h.requests[1].url, /after=3$/);
   assert.deepEqual(h.events, [4]);
+  assert.deepEqual(h.sleeps, [1000]);
+});
+
+test("repeated 422s back off instead of hammering the backend", async () => {
+  const rejected = () => new Response("ahead", { status: 422 });
+  const h = harness([rejected(), rejected(), rejected()], Array.from({ length: 6 }, () => snapshotAt(3, "running")), 7);
+  await runStreamLoop(h.options);
+  assert.deepEqual(h.sleeps, [1000, 2000, 4000]);
+});
+
+test("a gap the snapshot cannot repair backs off like a disconnect", async () => {
+  const h = harness(
+    [sse([ev(2, "run.started", {}), ev(5, "message.delta", {})]), sse([ev(3, "run.completed", {})])],
+    [snapshotAt(2, "running"), snapshotAt(2, "running"), snapshotAt(3, "completed")],
+  );
+  await runStreamLoop(h.options);
+  assert.deepEqual(h.events, [2, 3]);
+  assert.deepEqual(h.sleeps, [1000]);
+});
+
+test("a malformed frame keeps backing off until an event gets through", async () => {
+  const bad = () => new Response("id: 2\nevent: run.started\ndata: {bad\n\n", { status: 200, headers: { "Content-Type": "text/event-stream" } });
+  const h = harness([bad(), bad(), sse([ev(2, "run.completed", {})])], Array.from({ length: 3 }, () => snapshotAt(1, "running")).concat(snapshotAt(2, "completed")));
+  await runStreamLoop(h.options);
+  assert.deepEqual(h.sleeps, [1000, 2000]);
+  assert.deepEqual(h.events, [2]);
+});
+
+test("a 204 whose snapshot is not finished is treated as a disconnect", async () => {
+  const h = harness([new Response(null, { status: 204 }), sse([ev(2, "run.completed", {})])], [snapshotAt(1, "running"), snapshotAt(1, "running"), snapshotAt(2, "completed")]);
+  await runStreamLoop(h.options);
+  assert.deepEqual(h.sleeps, [1000]);
+  assert.deepEqual(h.events, [2]);
 });
 
 test("a disconnect reconnects with back-off and reports offline while the backend is down", async () => {

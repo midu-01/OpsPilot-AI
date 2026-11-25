@@ -29,7 +29,7 @@ const COMPONENTS: Components = {
       <span>{children}</span>
     ),
   table: ({ children }) => (
-    <div className="overflow-x-auto">
+    <div tabIndex={0} role="region" aria-label="Table" className="overflow-x-auto">
       <table>{children}</table>
     </div>
   ),

@@ -56,6 +56,7 @@ class StreamGapError extends Error {
 /** Resolves after `ms`, or as soon as the signal aborts. */
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
     const timer = setTimeout(done, ms);
     signal.addEventListener("abort", done, { once: true });
     function done() {
@@ -96,16 +97,18 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
       });
       if (response.status === 204) {
         await reconcile(); // finished and we are caught up: load the final snapshot
-        break;
+        if (isTerminalStatus(status)) break;
+        throw new Error("The stream ended but the run has not finished.");
       }
       if (response.status === 422) {
-        await reconcile(true); // our cursor is ahead of the run; restart from the server's
-        continue;
+        // Our cursor is ahead of the run (for example the database was reset):
+        // take the server's snapshot, then retry through the back-off path.
+        await reconcile(true);
+        throw new Error("The stream cursor was ahead of the run.");
       }
       if (!response.ok) throw new Error(`The run stream returned HTTP ${response.status}.`);
 
       options.onConnection("live");
-      failures = 0;
       for await (const event of readRunEvents(response)) {
         if (event.run_id !== runId) throw new Error("The stream belongs to a different run.");
         if (event.sequence <= cursor) continue; // already applied (replayed after a reconnect)
@@ -113,6 +116,7 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
         cursor = event.sequence;
         status = TERMINAL_EVENTS[event.type] ?? status;
         options.onEvent(event);
+        failures = 0; // reset only once an event got through, so a bad frame keeps backing off
       }
       // The server closes the stream after the run finishes. Load the final snapshot
       // (model calls, exact active time). Any other close is a disconnect.
@@ -121,8 +125,9 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
     } catch (error) {
       if (signal.aborted) return;
       if (error instanceof StreamGapError) {
+        const before = cursor;
         await reconcile().catch(() => undefined);
-        continue;
+        if (cursor > before) continue; // the snapshot covered the gap: reconnect right away
       }
       failures += 1;
       options.onConnection("reconnecting");

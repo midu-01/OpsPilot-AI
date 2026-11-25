@@ -17,8 +17,11 @@ import { TurnItem } from "./turn-item";
 interface RunTraceProps {
   state: RunState;
   items: TimelineItem[];
-  streaming: boolean;
-  onDecided: () => void;
+  /** Text is arriving right now (aria-busy). */
+  busy: boolean;
+  /** The run is not finished, so more steps may come (aria-setsize -1). */
+  live: boolean;
+  onDecided: (approvalId: string) => void;
   onConflict: (detail: string) => void;
 }
 
@@ -29,17 +32,17 @@ const DECISION_STEP = {
 } as const;
 
 /**
- * The trace, as an ARIA feed: one article per step. aria-busy is true while new
- * steps can still arrive, and aria-setsize is -1 until the total is known.
+ * The trace, as an ARIA feed: one article per step. aria-busy is true while text is
+ * streaming, and aria-setsize is -1 until the run finishes and the total is known.
  */
-export function RunTrace({ state, items, streaming, onDecided, onConflict }: RunTraceProps) {
+export function RunTrace({ state, items, busy, live, onDecided, onConflict }: RunTraceProps) {
   const timeZone = state.business_timezone;
 
   function approvalStep(approval: ApprovalSnapshot, position: StepPosition) {
     const id = `approval-${approval.id}`;
     if (approval.status === "pending") {
       return (
-        <TraceStep key={id} id={id} icon={ShieldAlert} tone="warning" title="Your approval is needed" focusableTitle {...position}>
+        <TraceStep key={id} id={id} icon={ShieldAlert} tone="warning" title="Your approval is needed" {...position}>
           <ApprovalCard runId={state.id} approval={approval} timeZone={timeZone} onDecided={onDecided} onConflict={onConflict} />
         </TraceStep>
       );
@@ -58,11 +61,11 @@ export function RunTrace({ state, items, streaming, onDecided, onConflict }: Run
       <h2 id="trace-heading" className="sr-only">
         Trace
       </h2>
-      <div role="feed" aria-busy={streaming} aria-labelledby="trace-heading">
+      <div role="feed" aria-busy={busy} aria-labelledby="trace-heading">
         {items.map((item, index) => {
           const position: StepPosition = {
             position: index + 1,
-            total: streaming ? -1 : items.length,
+            total: live ? -1 : items.length,
             isLast: index === items.length - 1,
           };
           switch (item.kind) {

@@ -8,7 +8,11 @@ export function JsonBlock({ value, label = "JSON" }: { value: unknown; label?: s
       <div className="absolute top-1.5 right-1.5">
         <CopyButton text={text} label={`Copy ${label}`} showLabel={false} />
       </div>
-      <pre className="max-h-96 overflow-auto rounded-md border border-border bg-surface-2 p-3 pr-11 font-mono text-xs leading-relaxed text-fg">
+      <pre
+        tabIndex={0}
+        aria-label={label}
+        className="max-h-96 overflow-auto rounded-md border border-border bg-surface-2 p-3 pr-11 font-mono text-xs leading-relaxed text-fg"
+      >
         {text}
       </pre>
     </div>

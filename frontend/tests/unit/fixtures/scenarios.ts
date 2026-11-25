@@ -4,7 +4,7 @@
  */
 import type { MessageSnapshot, RunEvent, RunSnapshot, ToolCallSnapshot } from "../../../src/lib/api.ts";
 
-export const RUN_ID = "run-123";
+export const RUN_ID = "0b4f3c52-6d1e-4c8a-9f3b-2a7d5e9c1f00";
 const T0 = Date.parse("2026-02-15T12:00:00Z");
 
 /** A queued run with only the user's goal and its run.queued event. */

@@ -7,6 +7,8 @@ export type ButtonSize = "sm" | "md" | "icon";
 const BASE =
   "inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md font-medium whitespace-nowrap " +
   "transition-colors duration-150 disabled:pointer-events-none disabled:opacity-50 " +
+  // aria-disabled keeps a busy button focusable, so keyboard focus is not lost mid-action.
+  "aria-disabled:pointer-events-none aria-disabled:opacity-60 " +
   "[&_svg]:size-4 [&_svg]:shrink-0";
 
 const VARIANTS: Record<ButtonVariant, string> = {

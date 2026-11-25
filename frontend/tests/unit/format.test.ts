@@ -95,3 +95,16 @@ test("truncate shortens on a word boundary", () => {
   assert.equal(truncate("  short   goal ", 30), "short goal");
   assert.equal(truncate("abcdefghijklmnopqrstuvwxyz", 10), "abcdefghi…");
 });
+
+test("date-only strings stay on their calendar day in any time zone", () => {
+  assert.equal(formatDate("2026-02-01", "America/Los_Angeles"), "Feb 1, 2026");
+  assert.equal(formatDateRange("2026-01-01", "2026-02-01", "America/Los_Angeles"), "Jan 1 – Feb 1, 2026");
+  // Timestamps still convert: 01:00 UTC is the previous evening in Los Angeles.
+  assert.equal(formatDate("2026-02-01T01:00:00Z", "America/Los_Angeles"), "Jan 31, 2026");
+});
+
+test("non-finite money and sub-second rounding are handled", () => {
+  assert.equal(formatMoneyMinor(Number.NaN), "—");
+  assert.equal(formatMoneyMinor(Number.POSITIVE_INFINITY), "—");
+  assert.equal(formatDuration(999.6), "999ms");
+});

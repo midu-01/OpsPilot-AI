@@ -32,6 +32,7 @@ export async function* readRunEvents(response: Response): AsyncGenerator<RunEven
             if (!event || event.schema_version !== 1 || !Number.isSafeInteger(event.sequence) ||
                 event.sequence < 1 || typeof event.run_id !== "string" || !RUN_EVENT_TYPES.includes(event.type) ||
                 !event.payload || typeof event.payload !== "object" || Array.isArray(event.payload) ||
+                typeof event.occurred_at !== "string" || Number.isNaN(Date.parse(event.occurred_at)) ||
                 (eventId && String(event.sequence) !== eventId) || (eventType && event.type !== eventType)) {
               throw new Error("The run stream contains an invalid event.");
             }

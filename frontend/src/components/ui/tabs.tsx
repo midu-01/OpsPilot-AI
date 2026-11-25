@@ -26,5 +26,6 @@ export function TabsTrigger({ className, ...props }: ComponentProps<typeof Radix
 }
 
 export function TabsContent({ className, ...props }: ComponentProps<typeof RadixTabs.Content>) {
-  return <RadixTabs.Content className={cx("outline-none", className)} {...props} />;
+  // Radix makes panels focusable; keep the global focus ring visible on them.
+  return <RadixTabs.Content className={className} {...props} />;
 }

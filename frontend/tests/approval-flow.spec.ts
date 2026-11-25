@@ -22,6 +22,7 @@ test("a refund approval survives a reload, then resumes the run and replays from
   await page.getByRole("button", { name: "Approve refund" }).click();
   await expect(page.getByRole("heading", { name: "Run completed" })).toBeVisible({ timeout: 20_000 });
   await expect(page.getByRole("heading", { name: "Refund approved" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Refund approved" })).toBeFocused();
   await expect(page.getByRole("button", { name: /issue_refund/ })).toContainText("$84.51 USD recorded");
   await expect(page).not.toHaveTitle(/Approval needed/);
   const liveSteps = await traceSteps(page);

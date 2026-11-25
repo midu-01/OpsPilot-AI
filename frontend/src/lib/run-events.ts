@@ -143,13 +143,23 @@ export function reduceRunState(state: RunState, action: RunAction): RunState {
     case "event":
       return reduceRunEvent(state, action.event);
     case "snapshot":
-      // Never go backwards: the stream may already have applied newer events.
-      if (!action.force && action.snapshot.snapshot_cursor < state.cursor) return state;
-      return createInitialRunState(action.snapshot);
+      // A snapshot replaces state only when it knows more: newer events, or the final
+      // numbers of a finished run. An older or equal one mid-run would drop live-only
+      // details (the streaming caret, calls waiting for their turn).
+      if (action.force || knowsMore(state, action.snapshot)) return createInitialRunState(action.snapshot);
+      // Same events, still running: keep the live state but take the model calls,
+      // which only snapshots carry.
+      if (action.snapshot.snapshot_cursor === state.cursor) return { ...state, model_calls: action.snapshot.model_calls };
+      return state;
     case "stop-accepted":
       // Status only: a running run keeps its stopwatch going, a paused one stays stopped.
       return FINISHED_STATUSES.has(state.status) ? state : { ...state, status: "cancelling" };
   }
+}
+
+function knowsMore(state: RunState, snapshot: RunSnapshot): boolean {
+  if (snapshot.snapshot_cursor !== state.cursor) return snapshot.snapshot_cursor > state.cursor;
+  return FINISHED_STATUSES.has(snapshot.status);
 }
 
 export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
@@ -222,7 +232,8 @@ function applyEvent(state: RunState, event: RunEvent): RunState {
 function withStatus(state: RunState, status: RunStatus, at: string): RunState {
   const isRunning = RUNNING_STATUSES.has(status);
   if (state.active_since !== null && !isRunning) {
-    const interval = Math.max(0, Date.parse(at) - Date.parse(state.active_since));
+    const elapsed = Date.parse(at) - Date.parse(state.active_since);
+    const interval = Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
     return { ...state, status, active_elapsed_ms: state.active_elapsed_ms + interval, active_since: null };
   }
   if (state.active_since === null && isRunning) return { ...state, status, active_since: at };

@@ -77,5 +77,6 @@ export function describeAnnouncement(state: RunState): string {
   if (state.pending_approval) {
     return `Approval needed: ${proposalTitle(parseRefundProposal(state.pending_approval.proposed_arguments))}.`;
   }
-  return isTerminalStatus(state.status) ? describeActivity(state).text : "";
+  const decided = state.status === "queued" && state.approvals.some((approval) => approval.status !== "pending");
+  return isTerminalStatus(state.status) || state.status === "cancelling" || decided ? describeActivity(state).text : "";
 }
