@@ -2,7 +2,7 @@ import { parseRefundProposal, proposalTitle } from "./approval.ts";
 import { errorTitle } from "./error-codes.ts";
 import { plural } from "./format.ts";
 import type { RunState } from "./run-events.ts";
-import { humanizeStatus, type Tone } from "./status.ts";
+import { humanizeStatus, isTerminalStatus, type Tone } from "./status.ts";
 
 /** The "now" line: one sentence about what the agent is doing at this moment. */
 export interface Activity {
@@ -67,4 +67,15 @@ function describeRunning(state: RunState): Activity {
 
   const nextTurn = Math.min(state.step_count + 1, state.max_agent_steps);
   return { text: `Waiting for the model (turn ${nextTurn} of ${state.max_agent_steps})…`, tone: "info", live: true };
+}
+
+/**
+ * What a screen reader should hear: the moment an approval is needed and the moment
+ * the run finishes. Everything else is visible on screen without interrupting.
+ */
+export function describeAnnouncement(state: RunState): string {
+  if (state.pending_approval) {
+    return `Approval needed: ${proposalTitle(parseRefundProposal(state.pending_approval.proposed_arguments))}.`;
+  }
+  return isTerminalStatus(state.status) ? describeActivity(state).text : "";
 }

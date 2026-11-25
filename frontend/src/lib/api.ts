@@ -217,7 +217,7 @@ export async function listRuns(
 }
 
 export async function getRun(runId: string, options?: { signal?: AbortSignal }): Promise<RunSnapshot> {
-  return request<RunSnapshot>(`/runs/${runId}`, {
+  return request<RunSnapshot>(`/runs/${encodeURIComponent(runId)}`, {
     method: "GET",
     signal: options?.signal,
   });
@@ -230,7 +230,7 @@ export async function decideApproval(
   reason?: string | null,
   options?: { signal?: AbortSignal }
 ): Promise<RunSummary> {
-  return request<RunSummary>(`/runs/${runId}/approve`, {
+  return request<RunSummary>(`/runs/${encodeURIComponent(runId)}/approve`, {
     method: "POST",
     body: JSON.stringify({
       approval_id: approvalId,
@@ -242,14 +242,14 @@ export async function decideApproval(
 }
 
 export async function stopRun(runId: string, options?: { signal?: AbortSignal }): Promise<RunSummary> {
-  return request<RunSummary>(`/runs/${runId}/stop`, {
+  return request<RunSummary>(`/runs/${encodeURIComponent(runId)}/stop`, {
     method: "POST",
     signal: options?.signal,
   });
 }
 
 export function getStreamUrl(runId: string, after?: number): string {
-  const url = apiUrl(`/runs/${runId}/stream`);
+  const url = apiUrl(`/runs/${encodeURIComponent(runId)}/stream`);
   if (after !== undefined && after > 0) {
     url.searchParams.set("after", after.toString());
   }
