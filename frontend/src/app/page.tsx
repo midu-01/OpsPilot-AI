@@ -1,9 +1,12 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
+import { loginPath } from "@/lib/auth";
 import { GoalComposer } from "@/features/new-run/goal-composer";
 import { RecentRuns, RecentRunsSkeleton } from "@/features/new-run/recent-runs";
 import { SystemStatus, SystemStatusSkeleton } from "@/features/new-run/system-status";
 import { ToolCatalogPanel } from "@/features/new-run/tool-catalog-panel";
+import { getCurrentUser } from "@/server/session";
 
 export const metadata: Metadata = { title: "New run" };
 
@@ -14,11 +17,16 @@ interface NewRunPageProps {
 
 /**
  * Server Component. The composer paints immediately; system status and recent runs
- * stream in through their own Suspense boundaries.
+ * stream in through their own Suspense boundaries. A stale session cookie (expired or
+ * revoked) passes proxy.ts, so the page asks the backend who is signed in; the layout
+ * already did, and cache() makes that one call.
  */
 export default async function NewRunPage({ searchParams }: NewRunPageProps) {
   const raw = (await searchParams).goal;
   const initialGoal = (Array.isArray(raw) ? raw[0] : raw)?.slice(0, 2000) ?? "";
+  if ((await getCurrentUser()).kind === "signed-out") {
+    redirect(loginPath(initialGoal ? `/?${new URLSearchParams({ goal: initialGoal })}` : "/"));
+  }
 
   return (
     <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_22rem]">

@@ -1,4 +1,16 @@
+import { readCookie, readSessionToken, SESSION_COOKIE } from "./auth.ts";
+
+/**
+ * The browser's only way to the backend: /api/* on the console's own origin. The proxy
+ * allowlists paths, refuses cross-origin writes, caps bodies, passes SSE through as it
+ * arrives, and turns the HttpOnly session cookie into `Authorization: Bearer <token>`.
+ * Browser JavaScript never holds the token. Health checks stay public.
+ */
+
 const API_PATH = /^(?:runs(?:\/[^/]+(?:\/(?:stream|approve|stop))?)?|health\/(?:live|ready))$/;
+
+// Only these request headers reach the backend: never the browser's Cookie or Authorization.
+const FORWARDED_HEADERS = ["accept", "content-type", "last-event-id"];
 
 // Node sends response headers with the first body chunk. A caught-up backend stream can stay
 // silent until its 15 s keepalive, so the proxy writes an SSE comment first; clients ignore it.
@@ -35,6 +47,16 @@ async function readBody(request: Request): Promise<string> {
 
 class BodyTooLarge extends Error {}
 
+function backendHeaders(request: Request, token: string | null): Headers {
+  const headers = new Headers();
+  for (const name of FORWARDED_HEADERS) {
+    const value = request.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  if (token !== null) headers.set("authorization", `Bearer ${token}`);
+  return headers;
+}
+
 function withOpeningComment(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   return new ReadableStream<Uint8Array>({
@@ -62,16 +84,20 @@ export async function forwardApiRequest(request: Request, path: string[]): Promi
     return Response.json({ detail: "Cross-origin requests are not allowed" }, { status: 403 });
   }
 
+  // Without a session the backend could only answer 401, so answer it here. FastAPI still
+  // checks every token it receives (expired, revoked, another user's run).
+  const isHealth = path[0] === "health";
+  const token = isHealth ? null : readSessionToken(readCookie(request.headers.get("cookie"), SESSION_COOKIE));
+  if (!isHealth && token === null) {
+    return Response.json({ detail: "Sign in to continue" }, { status: 401, headers: { "Cache-Control": "no-store" } });
+  }
+
   const streaming = request.method === "GET" && path.length === 3 && path[2] === "stream";
   const declaredLength = Number(request.headers.get("content-length") ?? 0);
   if (declaredLength > MAX_BODY_BYTES) {
     return Response.json({ detail: "Request body is too large" }, { status: 413 });
   }
-  const headers = new Headers();
-  for (const name of ["accept", "content-type", "last-event-id"]) {
-    const value = request.headers.get(name);
-    if (value !== null) headers.set(name, value);
-  }
+  const headers = backendHeaders(request, token);
 
   try {
     const base = process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8000";

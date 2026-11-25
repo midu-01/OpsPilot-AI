@@ -38,3 +38,6 @@ frontend/screenshots/
 docs/superpowers/
 2026-11-19-opspilot-ai-implementation.md
 PROJECT_REQUIREMENTS.md
+
+# Playwright sign-in state (session cookies)
+frontend/tests/.auth/

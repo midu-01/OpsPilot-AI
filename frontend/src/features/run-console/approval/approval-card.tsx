@@ -5,6 +5,7 @@ import { Check, Info, X } from "lucide-react";
 import { ApiError, decideApproval, type ApprovalDecision, type ApprovalSnapshot } from "@/lib/api";
 import { consequenceLine, parseRefundProposal } from "@/lib/approval";
 import { formatDate, formatMoneyMinor, formatMoneyWithCode, lateness } from "@/lib/format";
+import { redirectIfUnauthorized } from "@/lib/login-redirect";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -54,6 +55,7 @@ export function ApprovalCard({ runId, approval, timeZone, onDecided, onConflict 
       await decideApproval(runId, approval.id, decision, reason ?? null);
       onDecided(approval.id); // stays busy until approval.decided replaces this card
     } catch (caught) {
+      if (redirectIfUnauthorized(caught)) return; // the decision was not sent; it is still pending after sign-in
       inFlight.current = false;
       setSubmitting(null);
       (decision === "approve" ? approveButton : rejectButton).current?.focus();

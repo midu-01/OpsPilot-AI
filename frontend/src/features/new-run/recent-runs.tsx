@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { loginPath } from "@/lib/auth";
 import { formatRelativeTime } from "@/lib/format";
 import { runStatusMeta } from "@/lib/status";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -22,7 +23,15 @@ export async function RecentRuns() {
   return (
     <Card>
       <CardHeader title="Recent runs" titleId="recent-heading" actions={<AllRunsLink />} />
-      {result.kind === "unavailable" ? (
+      {result.kind === "signed-out" ? (
+        <p className="px-4 py-3 text-ui text-muted">
+          Your session has ended.{" "}
+          <Link href={loginPath("/")} className="font-medium text-link hover:underline">
+            Sign in again
+          </Link>{" "}
+          to see your runs.
+        </p>
+      ) : result.kind === "unavailable" ? (
         <p className="px-4 py-3 text-ui text-muted">Recent runs are unavailable. {result.message}</p>
       ) : result.page.items.length === 0 ? (
         <p className="px-4 py-3 text-ui text-muted">No runs yet. Your first run will show up here.</p>

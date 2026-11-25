@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { backoffDelay, runStreamLoop, type StreamConnection, type StreamLoopOptions } from "../../src/lib/run-stream-loop.ts";
-import type { RunEvent, RunSnapshot } from "../../src/lib/api.ts";
+import { ApiError, type RunEvent, type RunSnapshot } from "../../src/lib/api.ts";
 import { ev, QUEUED_SNAPSHOT, RUN_ID } from "./fixtures/scenarios.ts";
 
 function sse(events: RunEvent[], { comment = false } = {}): Response {
@@ -210,3 +210,37 @@ test("a finished run is never streamed", async () => {
 test("back-off doubles up to 15 seconds", () => {
   assert.deepEqual([0, 1, 2, 3, 4, 10].map(backoffDelay), [1000, 2000, 4000, 8000, 15000, 15000]);
 });
+
+test("a 401 from the stream stops the loop at once and asks the page to sign in again", async () => {
+  const h = harness([Response.json({ detail: "Sign in to continue" }, { status: 401 })], [snapshotAt(1, "running")]);
+  let unauthorized = 0;
+  h.options.onUnauthorized = () => {
+    unauthorized += 1;
+  };
+  await runStreamLoop(h.options);
+  assert.equal(unauthorized, 1);
+  assert.equal(h.requests.length, 1);
+  assert.deepEqual(h.sleeps, []); // no retries: only signing in again can help
+  assert.deepEqual(h.snapshots, []);
+});
+
+for (const [name, first] of [
+  ["after a disconnect", () => new TypeError("network down")],
+  ["after the stream reports the run finished", () => new Response(null, { status: 204 })],
+] as const) {
+  test(`a 401 while loading the snapshot ${name} also stops the loop`, async () => {
+    const h = harness([first()], []);
+    h.options.loadSnapshot = async () => {
+      throw new ApiError(401, "Request failed (401): Not authenticated", "Not authenticated");
+    };
+    let unauthorized = 0;
+    h.options.onUnauthorized = () => {
+      unauthorized += 1;
+    };
+    await runStreamLoop(h.options);
+    assert.equal(unauthorized, 1);
+    assert.equal(h.requests.length, 1);
+    assert.deepEqual(h.sleeps, []);
+    assert.notEqual(h.connections.at(-1), "closed");
+  });
+}

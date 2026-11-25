@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { ApiError, checkReadiness, createRun, getApiBaseUrl, getRun, getStreamUrl } from "../../src/lib/api.ts";
+import { ApiError, checkReadiness, createRun, getApiBaseUrl, getMe, getRun, getStreamUrl, listRuns, login, logout } from "../../src/lib/api.ts";
 
 function browserAt(t: TestContext, origin: string) {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -120,4 +120,106 @@ test("a body that is not JSON, or a snapshot missing its trace, becomes a 502 Ap
   t.mock.restoreAll();
   t.mock.method(globalThis, "fetch", async () => Response.json({ id: runId, messages: [] }));
   await assert.rejects(getRun(runId), (error: unknown) => error instanceof ApiError && error.status === 502);
+});
+
+function internalApi(t: TestContext) {
+  const original = process.env.API_INTERNAL_URL;
+  process.env.API_INTERNAL_URL = "http://backend:8000";
+  t.after(() => {
+    if (original === undefined) delete process.env.API_INTERNAL_URL;
+    else process.env.API_INTERNAL_URL = original;
+  });
+}
+
+const USER = { id: "5f0c7a52-3f7e-4d55-9a43-7f1d2c3b4a5e", email: "alex@opspilot.test", display_name: "Alex Rivera" };
+
+test("server loaders can pass the session's Authorization header to the backend", async (t) => {
+  internalApi(t);
+  const runId = "01234567-89ab-4cde-8fab-0123456789ab";
+  const sent: { url: string; authorization: string | null }[] = [];
+  t.mock.method(globalThis, "fetch", async (url: string, options: RequestInit) => {
+    sent.push({ url: String(url), authorization: new Headers(options.headers).get("authorization") });
+    if (String(url).includes("/runs/")) return Response.json({ id: runId, messages: [], events: [], snapshot_cursor: 0 });
+    return Response.json({ items: [], total: 0, page: 1, page_size: 20 });
+  });
+
+  await getRun(runId, { headers: { Authorization: "Bearer token-1" } });
+  await listRuns(2, 20, { headers: { Authorization: "Bearer token-2" } });
+
+  assert.deepEqual(sent, [
+    { url: `http://backend:8000/runs/${runId}`, authorization: "Bearer token-1" },
+    { url: "http://backend:8000/runs?page=2&page_size=20", authorization: "Bearer token-2" },
+  ]);
+});
+
+test("a 401 from the backend stays an ApiError with its status", async (t) => {
+  internalApi(t);
+  t.mock.method(globalThis, "fetch", async () => Response.json({ detail: "Not authenticated" }, { status: 401 }));
+  await assert.rejects(listRuns(), (error: unknown) => {
+    assert.ok(error instanceof ApiError);
+    assert.equal(error.status, 401);
+    assert.equal(error.detail, "Not authenticated");
+    return true;
+  });
+});
+
+test("login posts the credentials to the backend and checks the session it returns", async (t) => {
+  internalApi(t);
+  let sentUrl = "";
+  let sentBody: unknown = null;
+  const session = { access_token: "tok_abcdefghijklmnopqrstuvwxyz", token_type: "bearer", expires_at: "2026-11-25T22:00:00Z", user: USER };
+  t.mock.method(globalThis, "fetch", async (url: string, options: RequestInit) => {
+    sentUrl = String(url);
+    sentBody = JSON.parse(String(options.body));
+    return Response.json(session);
+  });
+
+  assert.deepEqual(await login("alex@opspilot.test", "secret"), session);
+  assert.equal(sentUrl, "http://backend:8000/auth/login");
+  assert.deepEqual(sentBody, { email: "alex@opspilot.test", password: "secret" });
+});
+
+test("login rejects a wrong password as a 401 and an odd session as a 502", async (t) => {
+  internalApi(t);
+  t.mock.method(globalThis, "fetch", async () => Response.json({ detail: "Invalid email or password" }, { status: 401 }));
+  await assert.rejects(login("alex@opspilot.test", "wrong"), (error: unknown) => error instanceof ApiError && error.status === 401);
+  t.mock.restoreAll();
+  const token = "tok_abcdefghijklmnopqrstuvwxyz";
+  const odd = [
+    {},
+    { access_token: "", expires_at: "2026-11-25T22:00:00Z", user: USER },
+    { access_token: "not a token; Path=/", expires_at: "2026-11-25T22:00:00Z", user: USER },
+    { access_token: token, expires_at: "soon", user: USER },
+    { access_token: token, expires_at: "2026-11-25T22:00:00Z", user: { id: 1 } },
+  ];
+  for (const body of odd) {
+    t.mock.method(globalThis, "fetch", async () => Response.json(body));
+    await assert.rejects(login("alex@opspilot.test", "secret"), (error: unknown) => error instanceof ApiError && error.status === 502);
+    t.mock.restoreAll();
+  }
+});
+
+test("getMe returns the signed-in user and refuses a body that is not one", async (t) => {
+  internalApi(t);
+  let authorization: string | null = null;
+  t.mock.method(globalThis, "fetch", async (_url: string, options: RequestInit) => {
+    authorization = new Headers(options.headers).get("authorization");
+    return Response.json(USER);
+  });
+  assert.deepEqual(await getMe({ headers: { Authorization: "Bearer t" } }), USER);
+  assert.equal(authorization, "Bearer t");
+  t.mock.restoreAll();
+  t.mock.method(globalThis, "fetch", async () => Response.json({ id: USER.id }));
+  await assert.rejects(getMe(), (error: unknown) => error instanceof ApiError && error.status === 502);
+});
+
+test("logout accepts the backend's empty 204 answer", async (t) => {
+  internalApi(t);
+  let request = "";
+  t.mock.method(globalThis, "fetch", async (url: string, options: RequestInit) => {
+    request = `${options.method} ${url} ${new Headers(options.headers).get("authorization")}`;
+    return new Response(null, { status: 204 });
+  });
+  assert.equal(await logout({ headers: { Authorization: "Bearer t" } }), undefined);
+  assert.equal(request, "POST http://backend:8000/auth/logout Bearer t");
 });
