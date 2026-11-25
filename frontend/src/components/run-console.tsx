@@ -37,7 +37,7 @@ export default function RunConsole({ initialSnapshot }: RunConsoleProps) {
     const fresh = await getRun(state.id, { signal });
     if (!signal?.aborted) {
       stateRef.current = createInitialRunState(fresh);
-      dispatch({ snapshot: fresh });
+      dispatch({ type: "snapshot", snapshot: fresh });
     }
   }, [state.id]);
 
@@ -99,7 +99,7 @@ export default function RunConsole({ initialSnapshot }: RunConsoleProps) {
             if (event.sequence !== lastSequence + 1) throw new Error("A run event is missing; refreshing the trace.");
             lastSequence = event.sequence;
             stateRef.current = reduceRunEvent(stateRef.current, event);
-            dispatch(event);
+            dispatch({ type: "event", event });
             backoffMs = 1000;
           }
           if (!isMounted) break;
