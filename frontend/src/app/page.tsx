@@ -1,42 +1,49 @@
-import GoalComposer from "../components/goal-composer";
-import BrowserConnection from "./browser-connection";
-import { checkReadiness } from "../lib/api";
+import { Suspense } from "react";
+import type { Metadata } from "next";
+import { GoalComposer } from "@/features/new-run/goal-composer";
+import { RecentRuns, RecentRunsSkeleton } from "@/features/new-run/recent-runs";
+import { SystemStatus, SystemStatusSkeleton } from "@/features/new-run/system-status";
+import { ToolCatalogPanel } from "@/features/new-run/tool-catalog-panel";
 
-export const dynamic = "force-dynamic";
+export const metadata: Metadata = { title: "New run" };
 
-export default async function HomePage() {
-  const ready = await checkReadiness(process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8000");
-
-  return (
-    <>
-      <h1 className="page-title">Agent Run Console</h1>
-      <p className="page-subtitle">
-        Enter an operations goal. The agent plans steps, queries orders, checks shipping
-        policies, and pauses for human approval before write actions.
-      </p>
-
-      {/* Goal Composer Card */}
-      <GoalComposer />
-
-      {/* System Status Panel */}
-      <section className="card" aria-labelledby="status-heading" style={{ marginTop: "32px" }}>
-        <h2 id="status-heading" style={{ fontSize: "1rem", margin: "0 0 12px" }}>
-          Environment Status
-        </h2>
-        <dl style={{ margin: 0 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid var(--color-border)" }}>
-            <dt style={{ color: "var(--color-text-muted)" }}>Backend &amp; Database</dt>
-            <dd className={ready ? "badge badge-completed" : "badge badge-failed"}>
-              {ready ? "Connected" : "Unavailable"}
-            </dd>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0" }}>
-            <dt style={{ color: "var(--color-text-muted)" }}>Browser to API</dt>
-            <BrowserConnection />
-          </div>
-        </dl>
-      </section>
-    </>
-  );
+interface NewRunPageProps {
+  /** ?goal= prefills the composer ("Retry with this goal" links here). */
+  searchParams: Promise<{ goal?: string | string[] }>;
 }
 
+/**
+ * Server Component. The composer paints immediately; system status and recent runs
+ * stream in through their own Suspense boundaries.
+ */
+export default async function NewRunPage({ searchParams }: NewRunPageProps) {
+  const raw = (await searchParams).goal;
+  const initialGoal = (Array.isArray(raw) ? raw[0] : raw)?.slice(0, 2000) ?? "";
+
+  return (
+    <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_22rem]">
+      <section aria-labelledby="new-run-heading" className="min-w-0 space-y-5">
+        <header>
+          <h1 id="new-run-heading" className="text-xl font-semibold tracking-tight text-fg">
+            Start a run
+          </h1>
+          <p className="mt-1 max-w-2xl text-sm text-muted">
+            Describe an operations task. The agent works through it with typed, read-only tools, streams every step, and
+            pauses for your approval before it writes anything.
+          </p>
+        </header>
+        <GoalComposer key={initialGoal} initialGoal={initialGoal} />
+      </section>
+
+      <aside aria-label="Agent and system" className="space-y-5">
+        <ToolCatalogPanel />
+        <Suspense fallback={<SystemStatusSkeleton />}>
+          <SystemStatus />
+        </Suspense>
+        <Suspense fallback={<RecentRunsSkeleton />}>
+          <RecentRuns />
+        </Suspense>
+      </aside>
+    </div>
+  );
+}
