@@ -17,7 +17,10 @@ export type RunLoadResult =
   | { kind: "not-found" }
   | { kind: "unavailable"; message: string };
 
-export type RunsLoadResult = { kind: "ok"; page: PaginatedRuns } | { kind: "unavailable"; message: string };
+/** `loadedAt` is the server clock when the data was read; relative times are computed from it. */
+export type RunsLoadResult =
+  | { kind: "ok"; page: PaginatedRuns; loadedAt: number }
+  | { kind: "unavailable"; message: string };
 
 /** cache() lets generateMetadata and the page share one backend call per request. */
 export const loadRun = cache(async (id: string): Promise<RunLoadResult> => {
@@ -32,7 +35,8 @@ export const loadRun = cache(async (id: string): Promise<RunLoadResult> => {
 export async function loadRuns(page: number, pageSize: number): Promise<RunsLoadResult> {
   await connection();
   try {
-    return { kind: "ok", page: await listRuns(page, pageSize, { signal: AbortSignal.timeout(BACKEND_TIMEOUT_MS) }) };
+    const runs = await listRuns(page, pageSize, { signal: AbortSignal.timeout(BACKEND_TIMEOUT_MS) });
+    return { kind: "ok", page: runs, loadedAt: Date.now() };
   } catch (error) {
     return { kind: "unavailable", message: describeLoadError(error) };
   }
