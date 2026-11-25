@@ -1,5 +1,26 @@
 const API_PATH = /^(?:runs(?:\/[^/]+(?:\/(?:stream|approve|stop))?)?|health\/(?:live|ready))$/;
 
+// Node sends response headers with the first body chunk. A caught-up backend stream can stay
+// silent until its 15 s keepalive, so the proxy writes an SSE comment first; clients ignore it.
+const STREAM_OPENED = new TextEncoder().encode(": connected\n\n");
+
+function withOpeningComment(body: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(STREAM_OPENED);
+    },
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) controller.close();
+      else controller.enqueue(value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason); // browser disconnected: stop reading the backend stream
+    },
+  });
+}
+
 export async function forwardApiRequest(request: Request, path: string[]): Promise<Response> {
   if (path.some((part) => !part || part === "." || part === ".." || /[\\/%?#\x00]/.test(part)) ||
       !API_PATH.test(path.join("/"))) {
@@ -38,7 +59,8 @@ export async function forwardApiRequest(request: Request, path: string[]): Promi
     }
 
     // Pass the stream through without collecting it; browser disconnect cancels the upstream reader.
-    return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+    const body = streaming && upstream.status === 200 && upstream.body ? withOpeningComment(upstream.body) : upstream.body;
+    return new Response(body, { status: upstream.status, headers: responseHeaders });
   } catch (error) {
     if (request.signal.aborted) throw error;
     return Response.json(
