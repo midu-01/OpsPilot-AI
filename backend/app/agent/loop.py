@@ -482,9 +482,6 @@ async def _execute_run(sessions: Sessions, run_id: UUID, provider: LLMProvider, 
         return
     except RunFailure as exc:
         failure = exc
-    except Exception as exc:
-        logger.exception("Unexpected execution error", extra={"run_id": str(run_id)})
-        failure = RunFailure("EXECUTION_ERROR", str(exc))
     await execution.finish(failure)
 
 
