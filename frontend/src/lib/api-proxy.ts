@@ -1,10 +1,9 @@
-import { readCookie, readSessionToken, SESSION_COOKIE } from "./auth.ts";
-
 /**
  * The browser's only way to the backend: /api/* on the console's own origin. The proxy
  * allowlists paths, refuses cross-origin writes, caps bodies, passes SSE through as it
- * arrives, and turns the HttpOnly session cookie into `Authorization: Bearer <token>`.
- * Browser JavaScript never holds the token. Health checks stay public.
+ * arrives, and turns the HttpOnly session cookie into `Authorization: Bearer <token>` (the
+ * route handler reads the cookie and passes the token in). Browser JavaScript never holds
+ * the token. Health checks stay public.
  */
 
 const API_PATH = /^(?:runs(?:\/[^/]+(?:\/(?:stream|approve|stop))?)?|health\/(?:live|ready))$/;
@@ -74,7 +73,7 @@ function withOpeningComment(body: ReadableStream<Uint8Array>): ReadableStream<Ui
   });
 }
 
-export async function forwardApiRequest(request: Request, path: string[]): Promise<Response> {
+export async function forwardApiRequest(request: Request, path: string[], sessionToken: string | null): Promise<Response> {
   if (path.some((part) => !part || part === "." || part === ".." || /[\\/%?#\x00]/.test(part)) ||
       !API_PATH.test(path.join("/"))) {
     return Response.json({ detail: "API route not found" }, { status: 404 });
@@ -87,7 +86,7 @@ export async function forwardApiRequest(request: Request, path: string[]): Promi
   // Without a session the backend could only answer 401, so answer it here. FastAPI still
   // checks every token it receives (expired, revoked, another user's run).
   const isHealth = path[0] === "health";
-  const token = isHealth ? null : readSessionToken(readCookie(request.headers.get("cookie"), SESSION_COOKIE));
+  const token = isHealth ? null : sessionToken;
   if (!isHealth && token === null) {
     return Response.json({ detail: "Sign in to continue" }, { status: 401, headers: { "Cache-Control": "no-store" } });
   }

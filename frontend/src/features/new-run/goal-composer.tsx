@@ -4,6 +4,7 @@ import { useId, useRef, useState, useTransition, type FormEvent, type KeyboardEv
 import { useRouter } from "next/navigation";
 import { ArrowUp, LoaderCircle } from "lucide-react";
 import { ApiError, createRun } from "@/lib/api";
+import { composerReturnPath } from "@/lib/auth";
 import { cx } from "@/lib/cx";
 import { redirectIfUnauthorized } from "@/lib/login-redirect";
 import type { GoalPreset } from "@/lib/presets";
@@ -17,7 +18,8 @@ const MAX_GOAL_LENGTH = 2000;
 
 /**
  * Starts a run: POST /api/runs (same-origin proxy), then opens the run console.
- * On failure the goal stays in the box and the error says what to do next.
+ * On failure the goal stays in the box and the error says what to do next. On a 401 (the
+ * session ended) the browser goes to sign in and comes back here with the goal in `?goal=`.
  */
 export function GoalComposer({ initialGoal = "" }: { initialGoal?: string }) {
   const router = useRouter();
@@ -46,7 +48,7 @@ export function GoalComposer({ initialGoal = "" }: { initialGoal?: string }) {
       startNavigation(() => router.push(`/runs/${run.id}`));
       setCreating(false);
     } catch (caught) {
-      if (redirectIfUnauthorized(caught)) return; // the session ended: sign in again, then come back here
+      if (redirectIfUnauthorized(caught, { next: composerReturnPath(trimmed) })) return;
       setCreating(false);
       setError(caught instanceof ApiError ? (caught.detail ?? caught.message) : "The run could not be started. Try again.");
     }

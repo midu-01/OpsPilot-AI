@@ -188,11 +188,9 @@ If running without Docker:
 
 ### Browser API Connection & Proxy Routing
 
-The browser sends commands, readiness checks, and SSE subscriptions to `/api` on the **same origin as the console**. Next.js forwards them to `API_INTERNAL_URL` (`http://backend:8000` in Compose; `http://127.0.0.1:8000` for native development). No browser-side port mapping or CORS permission is needed for the default console path, including the isolated test ports. SSE bodies are forwarded without buffering, with the replay cursor intact.
+The browser sends commands, readiness checks, and SSE subscriptions to `/api` on the **same origin as the console**. Next.js forwards them to `API_INTERNAL_URL` (`http://backend:8000` in Compose; `http://127.0.0.1:8000` for native development). No browser-side port mapping or CORS permission is needed, including on the isolated test ports. SSE bodies are forwarded without buffering, with the replay cursor intact.
 
-The console is a **backend-for-frontend**: the session token lives in an HttpOnly cookie (`opspilot_session`) that only the Next.js server reads. The `/api` proxy and the server-side page loaders turn it into `Authorization: Bearer <token>` (the proxy drops any `Authorization` header the browser sends, answers `401` without a session, and keeps `/health/*` public). Sign-in and sign-out never go through `/api`: they are Server Actions that call FastAPI's `/auth` endpoints from the Next.js server, so browser JavaScript never sees the token.
-
-`NEXT_PUBLIC_API_BASE_URL` is an optional **build-time** override for deployments intentionally using a separate browser API. Such deployments must configure CORS and browser network permissions themselves, and since browser JavaScript has no token to send, the backend would answer `401` to their run calls; do not set this override for the normal Compose setup.
+The console is a **backend-for-frontend**: the session token lives in an HttpOnly cookie (`opspilot_session`) that only the Next.js server reads. The `/api` proxy and the server-side page loaders turn it into `Authorization: Bearer <token>` (the proxy drops any `Authorization` header the browser sends, answers `401` without a session, and keeps `/health/*` public). Sign-in and sign-out never go through `/api`: they are Server Actions that call FastAPI's `/auth` endpoints from the Next.js server, so browser JavaScript never sees the token. For the same reason there is no browser-side API override: only the same-origin `/api` proxy can add the token.
 
 After pulling a frontend or backend fix, rebuild the running services from the repository root:
 ```sh

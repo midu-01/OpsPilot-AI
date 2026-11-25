@@ -35,7 +35,8 @@ export function NavLinks() {
                 )}
               >
                 <Icon aria-hidden className="size-4" />
-                {label}
+                {/* Icon-only below sm, so the signed-in header fits a 320 px screen; the name stays for screen readers. */}
+                <span className="sr-only sm:not-sr-only">{label}</span>
               </Link>
             </li>
           );

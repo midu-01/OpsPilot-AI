@@ -1,7 +1,7 @@
 import { Suspense } from "react";
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
-import { loginPath } from "@/lib/auth";
+import { composerReturnPath, loginPath } from "@/lib/auth";
 import { GoalComposer } from "@/features/new-run/goal-composer";
 import { RecentRuns, RecentRunsSkeleton } from "@/features/new-run/recent-runs";
 import { SystemStatus, SystemStatusSkeleton } from "@/features/new-run/system-status";
@@ -25,7 +25,7 @@ export default async function NewRunPage({ searchParams }: NewRunPageProps) {
   const raw = (await searchParams).goal;
   const initialGoal = (Array.isArray(raw) ? raw[0] : raw)?.slice(0, 2000) ?? "";
   if ((await getCurrentUser()).kind === "signed-out") {
-    redirect(loginPath(initialGoal ? `/?${new URLSearchParams({ goal: initialGoal })}` : "/"));
+    redirect(loginPath(composerReturnPath(initialGoal)));
   }
 
   return (

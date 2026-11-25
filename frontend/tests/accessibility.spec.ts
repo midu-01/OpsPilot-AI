@@ -45,3 +45,17 @@ for (const colorScheme of ["light", "dark"] as const) {
     });
   });
 }
+
+test("the signed-in header fits a 320 px screen: no wrapped nav labels, account button inside the gutter", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 });
+  await page.goto("/");
+  const links = await page.getByRole("navigation", { name: "Main" }).getByRole("link").all();
+  expect(links).toHaveLength(2);
+  for (const link of links) {
+    // A label that wraps inside the 32 px link makes its content taller than the link.
+    expect(await link.evaluate((el) => el.scrollHeight <= el.clientHeight)).toBe(true);
+  }
+  const accountRight = await page.getByRole("button", { name: /^Account/ }).evaluate((el) => el.getBoundingClientRect().right);
+  expect(accountRight).toBeLessThanOrEqual(320 - 16);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
