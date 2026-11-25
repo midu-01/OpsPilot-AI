@@ -1,4 +1,5 @@
-import { getRun, getStreamUrl, type RunEvent, type RunSnapshot, type RunStatus } from "./api.ts";
+import { ApiError, getRun, getStreamUrl, type RunEvent, type RunSnapshot, type RunStatus } from "./api.ts";
+import { isUnauthorizedError } from "./load-errors.ts";
 import { readRunEvents } from "./run-stream.ts";
 import { isTerminalStatus } from "./status.ts";
 
@@ -10,7 +11,8 @@ import { isTerminalStatus } from "./status.ts";
  *      something, so we load a fresh snapshot and reconnect from its cursor.
  *   3. On a disconnect, reload the snapshot, back off (1 s, 2 s, 4 s … 15 s), retry.
  *   4. Stop when the run is finished (terminal event, or 204 "finished and caught up"),
- *      or when the caller aborts (component unmount).
+ *      when the caller aborts (component unmount), or on 401: the session ended, so
+ *      retrying cannot help and the caller sends the user to sign in.
  *
  * The caller owns state: it receives events and snapshots through callbacks.
  */
@@ -27,6 +29,8 @@ export interface StreamLoopOptions {
   /** `force` is set when the server rejected our cursor (422) and the snapshot must replace state. */
   onSnapshot: (snapshot: RunSnapshot, force: boolean) => void;
   onConnection: (connection: StreamConnection) => void;
+  /** 401 from the stream or a snapshot: the loop has stopped; the caller sends the user to sign in. */
+  onUnauthorized?: () => void;
   // Injected in tests.
   fetchStream?: (url: string, init: RequestInit) => Promise<Response>;
   loadSnapshot?: (runId: string, signal: AbortSignal) => Promise<RunSnapshot>;
@@ -87,6 +91,12 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
     options.onSnapshot(snapshot, force);
   }
 
+  function sessionEnded(error: unknown): boolean {
+    if (!isUnauthorizedError(error)) return false;
+    options.onUnauthorized?.();
+    return true;
+  }
+
   while (!signal.aborted && !isTerminalStatus(status)) {
     try {
       options.onConnection(failures === 0 ? "connecting" : "reconnecting");
@@ -95,6 +105,7 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
         cache: "no-store",
         signal,
       });
+      if (response.status === 401) throw new ApiError(401, "Sign in to continue.", "Sign in to continue.");
       if (response.status === 204) {
         await reconcile(); // finished and we are caught up: load the final snapshot
         if (isTerminalStatus(status)) break;
@@ -123,7 +134,7 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
       await reconcile();
       if (!isTerminalStatus(status)) throw new Error("The stream closed before the run finished.");
     } catch (error) {
-      if (signal.aborted) return;
+      if (signal.aborted || sessionEnded(error)) return;
       if (error instanceof StreamGapError) {
         const before = cursor;
         await reconcile().catch(() => undefined);
@@ -133,8 +144,8 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
       options.onConnection("reconnecting");
       try {
         await reconcile();
-      } catch {
-        if (signal.aborted) return;
+      } catch (reconcileError) {
+        if (signal.aborted || sessionEnded(reconcileError)) return;
         options.onConnection("offline");
       }
       if (isTerminalStatus(status)) break;

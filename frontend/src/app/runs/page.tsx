@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { History, Plus } from "lucide-react";
+import { loginPath } from "@/lib/auth";
 import { RUNS_PAGE_SIZE, countUnfinished, parsePageParam, summarizePage } from "@/lib/runs-page";
 import { plural } from "@/lib/format";
 import { BackendUnavailable } from "@/components/states/backend-unavailable";
@@ -17,10 +19,14 @@ interface RunsPageProps {
   searchParams: Promise<{ page?: string | string[] }>;
 }
 
-/** Server Component: the run history, paginated with ?page=N (the API supports page and page_size only). */
+/**
+ * Server Component: the signed-in user's run history, paginated with ?page=N (the API
+ * supports page and page_size only). A 401 sends the user to sign in and back here.
+ */
 export default async function RunsPage({ searchParams }: RunsPageProps) {
   const page = parsePageParam((await searchParams).page);
   const result = await loadRuns(page, RUNS_PAGE_SIZE);
+  if (result.kind === "signed-out") redirect(loginPath(page > 1 ? `/runs?page=${page}` : "/runs"));
   if (result.kind === "unavailable") {
     return <BackendUnavailable title="Runs can't be loaded right now" message={result.message} />;
   }

@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.runs.schemas import ToolFailure, ToolSuccess
+from app.search.embeddings import HashingEmbedder
 from app.tools import ToolContext, ToolRegistry, ToolSpec
 
 
@@ -24,7 +25,7 @@ async def test_only_valid_read_calls_reach_executor() -> None:
         ToolSpec("mutate", "write count", CountArgs, record, requires_approval=True, is_read_only=False),
     )
     async with AsyncSession() as session:
-        context = ToolContext(session, datetime(2026, 11, 1, tzinfo=UTC), "UTC")
+        context = ToolContext(session, datetime(2026, 11, 1, tzinfo=UTC), "UTC", HashingEmbedder())
         for name, arguments, code in [
             ("unknown", {}, "UNKNOWN_TOOL"),
             ("count", {"count": "5"}, "INVALID_ARGUMENTS"),

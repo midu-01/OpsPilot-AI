@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useState } from "react";
 import { getRun, type RunSnapshot } from "@/lib/api";
+import { redirectIfUnauthorized, redirectToLogin } from "@/lib/login-redirect";
 import { createInitialRunState, reduceRunState, type RunState } from "@/lib/run-events";
 import { runStreamLoop, type StreamConnection } from "@/lib/run-stream-loop";
 import { isTerminalStatus } from "@/lib/status";
@@ -19,7 +20,8 @@ export interface RunStream {
 /**
  * Live state for one run: the reducer (lib/run-events.ts) fed by the stream loop
  * (lib/run-stream-loop.ts). The loop starts from the snapshot the server rendered
- * and is aborted when the component unmounts.
+ * and is aborted when the component unmounts. A 401 (the session ended) sends the
+ * browser to sign in and back to this run.
  */
 export function useRunStream(initialSnapshot: RunSnapshot): RunStream {
   // Later prop changes are ignored; the page keys the console by run id.
@@ -40,6 +42,7 @@ export function useRunStream(initialSnapshot: RunSnapshot): RunStream {
       onEvent: (event) => dispatch({ type: "event", event }),
       onSnapshot: (snapshot, force) => dispatch({ type: "snapshot", snapshot, force }),
       onConnection: setConnection,
+      onUnauthorized: () => redirectToLogin(),
     }).catch(() => {
       if (!controller.signal.aborted) setConnection("offline");
     });
@@ -47,8 +50,11 @@ export function useRunStream(initialSnapshot: RunSnapshot): RunStream {
   }, [start]);
 
   const refresh = useCallback(async () => {
-    const snapshot = await getRun(start.id);
-    dispatch({ type: "snapshot", snapshot });
+    try {
+      dispatch({ type: "snapshot", snapshot: await getRun(start.id) });
+    } catch (error) {
+      if (!redirectIfUnauthorized(error)) throw error;
+    }
   }, [start.id]);
 
   const markStopping = useCallback(() => dispatch({ type: "stop-accepted" }), []);

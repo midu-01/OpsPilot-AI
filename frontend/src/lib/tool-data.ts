@@ -1,4 +1,4 @@
-import { asBoolean, asNumber, asRecord, asString, isRecord } from "./json.ts";
+import { asBoolean, asNumber, asRecord, asString, asStringArray, isRecord } from "./json.ts";
 
 /**
  * Narrowing for tool results. ToolCallSnapshot.result is `ToolResult | string | null`,
@@ -86,12 +86,25 @@ export function parseOrdersData(data: unknown): OrdersData | null {
 
 // --- search_policies -----------------------------------------------------------
 
+/** Why a policy matched: the query names its ID, full-text keywords, or embedding similarity (meaning). */
+export type PolicyMatchReason = "id" | "keyword" | "semantic";
+
+/** "keyword" means the embedding model was unavailable, so the backend searched by ID and keywords only. */
+export type PolicySearchMode = "hybrid" | "keyword";
+
+/** The backend's order. Parsing filters this list, so unknown reasons and repeats are dropped. */
+const MATCH_REASONS: readonly PolicyMatchReason[] = ["id", "keyword", "semantic"];
+
 export interface PolicyMatch {
   id: string;
   title: string;
   version: string | null;
   file: string | null;
   excerpt: string;
+  /** Empty for results saved before hybrid search, which had no matched_by. */
+  matchedBy: PolicyMatchReason[];
+  /** Cosine similarity (0–1) of the best paragraph. The backend sends null unless the policy matched by meaning. */
+  similarity: number | null;
 }
 
 export interface PolicySearchData {
@@ -99,6 +112,24 @@ export interface PolicySearchData {
   matches: PolicyMatch[];
   totalPolicies: number | null;
   message: string | null;
+  /** Null for results saved before hybrid search, and for modes this console does not know. */
+  searchMode: PolicySearchMode | null;
+}
+
+function parseMatchReasons(value: unknown): PolicyMatchReason[] {
+  const reasons = asStringArray(value);
+  return MATCH_REASONS.filter((reason) => reasons.includes(reason));
+}
+
+/** Shown as a percentage, so anything that is not a number from 0 to 1 is treated as missing. */
+function parseSimilarity(value: unknown): number | null {
+  const similarity = asNumber(value);
+  return similarity !== null && similarity >= 0 && similarity <= 1 ? similarity : null;
+}
+
+function parseSearchMode(value: unknown): PolicySearchMode | null {
+  const mode = asString(asRecord(value)?.mode);
+  return mode === "hybrid" || mode === "keyword" ? mode : null;
 }
 
 export function parsePolicySearchData(data: unknown): PolicySearchData | null {
@@ -115,6 +146,8 @@ export function parsePolicySearchData(data: unknown): PolicySearchData | null {
       version: asString(match.version),
       file: asString(match.file),
       excerpt: asString(match.excerpt) ?? "",
+      matchedBy: parseMatchReasons(match.matched_by),
+      similarity: parseSimilarity(match.similarity),
     });
   }
   return {
@@ -122,6 +155,7 @@ export function parsePolicySearchData(data: unknown): PolicySearchData | null {
     matches,
     totalPolicies: asNumber(record.total_policies),
     message: asString(record.message),
+    searchMode: parseSearchMode(record.search),
   };
 }
 

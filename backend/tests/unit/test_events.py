@@ -31,9 +31,7 @@ def test_valid_event_types_and_defaults() -> None:
 
 def test_invalid_event_types_rejected() -> None:
     with pytest.raises(ValidationError) as exc:
-        RunEvent.model_validate(
-            {"run_id": uuid4(), "sequence": 1, "type": "invalid.event.type", "occurred_at": NOW}
-        )
+        RunEvent.model_validate({"run_id": uuid4(), "sequence": 1, "type": "invalid.event.type", "occurred_at": NOW})
     assert "Input should be 'run.queued'" in str(exc.value)
 
 
@@ -55,9 +53,7 @@ def test_schema_version_must_be_one() -> None:
 def test_unaware_datetime_rejected() -> None:
     naive = datetime(2026, 11, 22, 12, 0, 0)
     with pytest.raises(ValidationError):
-        RunEvent.model_validate(
-            {"run_id": uuid4(), "sequence": 1, "type": EventType.run_queued, "occurred_at": naive}
-        )
+        RunEvent.model_validate({"run_id": uuid4(), "sequence": 1, "type": EventType.run_queued, "occurred_at": naive})
 
 
 def test_event_sse_formatting_and_roundtrip() -> None:
@@ -149,4 +145,3 @@ async def test_event_post_commit_and_rollback_hooks() -> None:
         assert sub.is_set()
     finally:
         await broker.unsubscribe(run_id, sub)
-

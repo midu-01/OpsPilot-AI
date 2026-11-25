@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { USERS } from "./tests/helpers";
 
 const isExternalStack = process.env.E2E_EXTERNAL_STACK === "1";
 const baseURL =
@@ -6,7 +7,6 @@ const baseURL =
 
 export default defineConfig({
   testDir: "./tests",
-  testMatch: /.*\.spec\.ts/,
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: 0,
@@ -17,9 +17,18 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   projects: [
+    // Signs in Alex and Sam through the form and saves their cookies under tests/.auth/ (git-ignored).
+    {
+      name: "setup",
+      testMatch: /auth\.setup\.ts/,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    // Every spec runs as Alex unless it says otherwise (auth.spec.ts uses Sam and signed-out browsers).
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      testMatch: /.*\.spec\.ts/,
+      dependencies: ["setup"],
+      use: { ...devices["Desktop Chrome"], storageState: USERS.alex.storageState },
     },
   ],
 });

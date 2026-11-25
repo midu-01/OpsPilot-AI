@@ -3,6 +3,7 @@
 import { useState, type KeyboardEvent } from "react";
 import { LoaderCircle, Square } from "lucide-react";
 import { ApiError, stopRun, type RunStatus } from "@/lib/api";
+import { redirectIfUnauthorized } from "@/lib/login-redirect";
 import { canStop } from "@/lib/status";
 import { Button } from "@/components/ui/button";
 
@@ -41,6 +42,7 @@ export function StopControl({ runId, status, onStopped }: StopControlProps) {
       await stopRun(runId);
       onStopped();
     } catch (caught) {
+      if (redirectIfUnauthorized(caught)) return; // the session ended: sign in again, then come back here
       setError(caught instanceof ApiError && caught.status !== 0 ? (caught.detail ?? caught.message) : "Could not reach the backend to stop the run.");
       setPhase("idle");
     }

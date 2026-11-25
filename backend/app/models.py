@@ -1,14 +1,16 @@
-"""Relational storage for the run transcript, event history, usage and demo ledger."""
+"""Relational storage for accounts, the run transcript, event history, usage, demo ledger and policy index."""
 
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID, uuid4
 
+from pgvector.sqlalchemy import Vector
 from pydantic import JsonValue
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -21,10 +23,11 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.runs.schemas import ApprovalStatus, EventType, RunStatus
+from app.search.embeddings import EMBEDDING_DIMENSIONS
 
 UUIDKey = Annotated[UUID, mapped_column(primary_key=True, default=uuid4)]
 CreatedAt = Annotated[datetime, mapped_column(DateTime(timezone=True), server_default=func.now())]
@@ -52,6 +55,39 @@ def allowed_values(column: str, values: type[RunStatus] | type[ApprovalStatus] |
     return CheckConstraint(f"{column} IN ({literals})", name=column)
 
 
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("email"),
+        # One canonical spelling, so " Alex@OpsPilot.test" and "alex@opspilot.test" cannot become two accounts.
+        CheckConstraint("email = lower(btrim(email)) AND strpos(email, '@') > 0", name="normalized_email"),
+        CheckConstraint("length(btrim(display_name)) > 0", name="nonblank_display_name"),
+    )
+
+    id: Mapped[UUIDKey]
+    email: Mapped[str]
+    display_name: Mapped[str]
+    password_hash: Mapped[str]
+    created_at: Mapped[CreatedAt]
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+    __table_args__ = (
+        UniqueConstraint("token_hash"),
+        # Only the SHA-256 hex digest is stored, so a database leak does not hand out working tokens.
+        CheckConstraint("token_hash ~ '^[0-9a-f]{64}$'", name="token_hash"),
+        Index("ix_user_sessions_user_id", "user_id"),
+    )
+
+    id: Mapped[UUIDKey]
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    token_hash: Mapped[str]
+    created_at: Mapped[CreatedAt]
+    expires_at: Mapped[Timestamp]
+    revoked_at: Mapped[Timestamp | None]
+
+
 class Run(Base):
     __tablename__ = "runs"
     __table_args__ = (
@@ -69,9 +105,13 @@ class Run(Base):
         CheckConstraint("estimated_cost_usd >= 0 AND duration_ms >= 0", name="nonnegative_metrics"),
         Index("ix_runs_created_at_id", "created_at", "id"),
         Index("ix_runs_status", "status"),
+        Index("ix_runs_user_id_created_at_id", "user_id", "created_at", "id"),
     )
 
     id: Mapped[UUIDKey]
+    # Nullable only for runs created before accounts existed: every query filters by owner, so those stay hidden
+    # until the seed assigns them to the first demo user.
+    user_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     goal: Mapped[str]
     status: Mapped[str] = mapped_column(server_default="queued")
     provider: Mapped[str]
@@ -263,3 +303,42 @@ class SeedMetadata(Base):
 
     key: Mapped[str] = mapped_column(primary_key=True)
     reference_date: Mapped[date]
+
+
+class PolicyChunk(Base):
+    """One paragraph of a bundled policy, indexed for keyword (tsvector) and meaning (pgvector) search."""
+
+    __tablename__ = "policy_chunks"
+    __table_args__ = (
+        UniqueConstraint("policy_id", "chunk_index"),
+        CheckConstraint("chunk_index >= 0", name="nonnegative_chunk_index"),
+        CheckConstraint("content_sha256 ~ '^[0-9a-f]{64}$'", name="content_sha256"),
+        Index("ix_policy_chunks_search_vector", "search_vector", postgresql_using="gin"),
+        Index(
+            "ix_policy_chunks_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    policy_id: Mapped[str]
+    version: Mapped[str]
+    title: Mapped[str]
+    file: Mapped[str]
+    chunk_index: Mapped[int]
+    content: Mapped[str]
+    content_sha256: Mapped[str]
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIMENSIONS))
+    embedding_model: Mapped[str]
+    indexed_at: Mapped[CreatedAt] = mapped_column(onupdate=func.now())
+    # PostgreSQL recomputes this on every write, so the keyword index can never drift from the text.
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "setweight(to_tsvector('english', title), 'A') || setweight(to_tsvector('english', content), 'B')",
+            persisted=True,
+        ),
+    )

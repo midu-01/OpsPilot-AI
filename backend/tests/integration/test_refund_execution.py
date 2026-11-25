@@ -15,14 +15,16 @@ from app.models import Approval, Message, Order, Refund, Run, RunEventRecord, To
 from app.runs.refunds import propose, resolve
 from app.runs.schemas import ToolResult
 from app.runs.service import create_run
+from tests.integration.accounts import create_user
 
 type Sessions = async_sessionmaker[AsyncSession]
 type Request = tuple[UUID, UUID]
 
 
 async def prepare(sessions: Sessions, *, approval_status: str | None = "approved") -> Request:
+    owner = await create_user(sessions)
     async with sessions() as session:
-        created = await create_run(session, "Refund the late shipment")
+        created = await create_run(session, owner.id, "Refund the late shipment")
         async with session.begin():
             run = await session.get_one(Run, created.id, with_for_update=True)
             run.status = "running"

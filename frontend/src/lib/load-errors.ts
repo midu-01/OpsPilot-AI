@@ -5,6 +5,14 @@ export function isMissingRunError(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 404 || error.status === 422);
 }
 
+/**
+ * 401: the session cookie is missing, expired or revoked (FastAPI, or the /api proxy when
+ * there is no cookie at all). The user has to sign in again; retrying cannot help.
+ */
+export function isUnauthorizedError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
+}
+
 /** A short, user-facing reason why server-side data could not be loaded. */
 export function describeLoadError(error: unknown): string {
   if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {

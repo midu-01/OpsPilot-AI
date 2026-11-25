@@ -405,10 +405,7 @@ class _AnthropicTurn:
         return None
 
     def finish(self) -> list[ModelEvent]:
-        events = [
-            _tool_call(call["id"], call["name"], call["arguments"])
-            for call in self.calls.values()
-        ]
+        events = [_tool_call(call["id"], call["name"], call["arguments"]) for call in self.calls.values()]
         return [*events, ModelEvent(ModelEventType.turn_complete)]
 
 

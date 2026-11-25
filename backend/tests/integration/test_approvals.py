@@ -16,6 +16,7 @@ from app.models import Approval, Order, Refund, Run
 from app.runs.decisions import decide_approval
 from app.runs.schemas import ApprovalAction, ApprovalDecision
 from app.runs.service import create_run, get_snapshot
+from tests.integration.accounts import create_user
 
 type Sessions = async_sessionmaker[AsyncSession]
 END = ModelEvent(ModelEventType.turn_complete)
@@ -23,8 +24,9 @@ ANSWER = ModelEvent(ModelEventType.text_delta, text="Reviewed.")
 
 
 async def prepared(sessions: Sessions, **limits: int) -> UUID:
+    owner = await create_user(sessions)
     async with sessions() as session:
-        created = await create_run(session, "Review and refund the late shipment")
+        created = await create_run(session, owner.id, "Review and refund the late shipment")
         async with session.begin():
             run = await session.get_one(Run, created.id)
             run.status = "running"

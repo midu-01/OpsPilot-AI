@@ -1,4 +1,5 @@
-"""Initialize the versioned local order fixtures without overwriting existing records."""
+"""Initialize the demo data: demo users, versioned order fixtures (never overwriting existing records) and the
+policy index."""
 
 import argparse
 import asyncio
@@ -8,8 +9,12 @@ from datetime import UTC, date, datetime, time, timedelta
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.seed import seed_demo_users
+from app.config import settings
 from app.db import async_session_factory, engine
 from app.models import Order, SeedMetadata
+from app.search.embeddings import get_embedder
+from app.search.indexer import index_policies
 
 SEED_KEY = "demo-orders-v1"
 
@@ -69,6 +74,9 @@ async def seed_orders(session: AsyncSession, reference: date) -> date:
 
 async def initialize(reference: date) -> None:
     try:
+        # Users first: the seed hands runs created before accounts existed to the first demo user.
+        async with async_session_factory.begin() as session:
+            await seed_demo_users(session, settings.demo_user_password.get_secret_value())
         async with async_session_factory.begin() as session:
             actual = await seed_orders(session, reference)
         first, end = previous_month(actual)
@@ -76,6 +84,11 @@ async def initialize(reference: date) -> None:
             f"Demo reference date: {actual} UTC. Example goal: Find late shipments over $500 "
             f"from {first} (inclusive) to {end} (exclusive) and draft refund emails."
         )
+        # Synced from the bundled files on every start; paragraphs that did not change are not embedded again.
+        embedder = get_embedder()
+        async with async_session_factory.begin() as session:
+            report = await index_policies(session, embedder)
+        print(f"Policy index ({embedder.name}): {report}.")
     finally:
         await engine.dispose()
 

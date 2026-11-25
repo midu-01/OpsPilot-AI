@@ -25,9 +25,11 @@ from app.runs.schemas import (
 )
 
 
-async def create_run(session: AsyncSession, goal: str) -> RunSummary:
+async def create_run(session: AsyncSession, user_id: UUID, goal: str) -> RunSummary:
+    """Queue a run owned by user_id; the API never creates a run without an owner."""
     async with session.begin():
         run = Run(
+            user_id=user_id,
             goal=goal,
             status=RunStatus.queued.value,
             provider=settings.llm_provider,
@@ -47,12 +49,18 @@ async def create_run(session: AsyncSession, goal: str) -> RunSummary:
         return RunSummary.model_validate(run, from_attributes=True)
 
 
-async def list_runs(session: AsyncSession, page: int, page_size: int) -> PaginatedRuns:
+async def list_runs(session: AsyncSession, user_id: UUID, page: int, page_size: int) -> PaginatedRuns:
+    """One page of the user's own runs, newest first; total counts only their runs too."""
+    owned = Run.user_id == user_id
     async with session.begin():
         await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-        total = await session.scalar(select(func.count()).select_from(Run))
+        total = await session.scalar(select(func.count()).select_from(Run).where(owned))
         rows = await session.scalars(
-            select(Run).order_by(Run.created_at.desc(), Run.id.desc()).offset((page - 1) * page_size).limit(page_size)
+            select(Run)
+            .where(owned)
+            .order_by(Run.created_at.desc(), Run.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
         )
         return PaginatedRuns(
             items=[RunSummary.model_validate(run, from_attributes=True) for run in rows],

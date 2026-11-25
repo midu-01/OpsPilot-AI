@@ -5,11 +5,15 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI, Response, status
+from fastapi import FastAPI, Request, Response, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.agent.worker import run_worker
+from app.auth.routes import router as auth_router
 from app.config import settings
 from app.db import async_session_factory, engine
 from app.runs.routes import router as runs_router
@@ -41,7 +45,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(auth_router)
 app.include_router(runs_router)
+
+# FastAPI's default 422 body repeats each invalid value under "input" (and limits under "ctx"),
+# which would echo a rejected password from POST /auth/login. Say which field failed and why, never what was sent.
+VALIDATION_ERROR_KEYS = ("type", "loc", "msg")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_without_input(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = [{key: error[key] for key in VALIDATION_ERROR_KEYS if key in error} for error in exc.errors()]
+    return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, content={"detail": jsonable_encoder(errors)})
 
 
 @app.get("/health/live", tags=["health"])

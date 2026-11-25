@@ -1,8 +1,14 @@
 import { FileText } from "lucide-react";
-import { parsePolicySearchData } from "@/lib/tool-data";
+import { parsePolicySearchData, type PolicyMatch } from "@/lib/tool-data";
+import { describeMatchReasons, summarizePolicySearch } from "@/lib/tool-summaries";
+import { Badge } from "@/components/ui/badge";
 import { JsonBlock } from "../json-block";
 import type { ToolViewProps } from "../types";
 
+/**
+ * Policy citations (ID, title, version, file, exact excerpt) with badges that say why each policy matched.
+ * Results saved before hybrid search carry no reasons or mode, so they render exactly as they always did.
+ */
 export function SearchPoliciesView({ data }: ToolViewProps) {
   const result = parsePolicySearchData(data);
   if (!result) return <JsonBlock value={data} label="result" />;
@@ -11,6 +17,7 @@ export function SearchPoliciesView({ data }: ToolViewProps) {
     return <p className="text-sm text-muted">{result.message ?? "No policies matched the search terms."}</p>;
   }
 
+  const footer = summarizePolicySearch(result);
   return (
     <ul className="space-y-2">
       {result.matches.map((match) => (
@@ -28,15 +35,32 @@ export function SearchPoliciesView({ data }: ToolViewProps) {
               </span>
             ) : null}
           </div>
+          <MatchReasons match={match} />
           {match.excerpt ? <p className="mt-1.5 line-clamp-4 text-ui text-muted">{match.excerpt}</p> : null}
         </li>
       ))}
-      {result.totalPolicies !== null ? (
-        <li className="text-xs text-subtle">
-          {result.matches.length} of {result.totalPolicies} policies matched
-          {result.query ? ` "${result.query}"` : ""}.
+      {footer ? <li className="text-xs break-words text-subtle">{footer}</li> : null}
+    </ul>
+  );
+}
+
+/**
+ * Text badges ("Policy ID", "Keyword", "Meaning 71%"), so the reason never depends on colour. Screen readers
+ * hear the full sentence instead of the short text ("Matched by meaning, 71% similar").
+ */
+function MatchReasons({ match }: { match: PolicyMatch }) {
+  const badges = describeMatchReasons(match);
+  if (badges.length === 0) return null;
+  return (
+    <ul className="mt-1.5 flex flex-wrap gap-1.5">
+      {badges.map((badge) => (
+        <li key={badge.reason}>
+          <Badge>
+            <span aria-hidden>{badge.text}</span>
+            <span className="sr-only">{badge.label}</span>
+          </Badge>
         </li>
-      ) : null}
+      ))}
     </ul>
   );
 }

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Refund
 from app.runs.schemas import ToolFailure, ToolSuccess
+from app.search.embeddings import HashingEmbedder
 from app.seed import seed_orders
 from app.tools import ToolContext
 from app.tools.registry import get_registry
@@ -16,7 +17,7 @@ async def test_catalog_can_investigate_a_refund_but_cannot_issue_it(db_session: 
     clock = datetime(2026, 11, 19, tzinfo=UTC)
     async with db_session.begin():
         await seed_orders(db_session, clock.date())
-    context = ToolContext(db_session, clock, "UTC")
+    context = ToolContext(db_session, clock, "UTC", HashingEmbedder())
     dispatch = get_registry().dispatch
     month = await dispatch("date_math", {"operation": "previous_month"}, context)
     assert isinstance(month, ToolSuccess) and isinstance(month.data, dict)

@@ -30,7 +30,8 @@ export const TOOL_CATALOG: readonly ToolCatalogEntry[] = [
     title: "Search policies",
     access: "read",
     requiresApproval: false,
-    description: "Keyword search over the 8 policy documents. Returns citations with excerpts.",
+    description:
+      "Searches the 8 policy documents by ID, keywords and meaning (full-text search plus pgvector). Returns cited excerpts and why each matched.",
   },
   {
     name: "issue_refund",

@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     model_timeout_seconds: PositiveInt = 60
     max_active_run_seconds: PositiveInt = 300
     cors_allowed_origins: str = "http://localhost:3000"
+    # Policy search: "local" runs the embedding model in this process; "hashing" is the deterministic test stand-in.
+    embedding_provider: Literal["local", "hashing"] = "local"
+    embedding_cache_dir: str | None = None
+    # Accounts: the seed gives the demo users this password and skips them while it is empty.
+    demo_user_password: SecretStr = SecretStr("")
+    session_ttl_hours: PositiveInt = 12
+    login_max_failures: PositiveInt = 5
+    login_window_seconds: PositiveInt = 900
 
     @property
     def selected_model(self) -> str:

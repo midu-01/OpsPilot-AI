@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ArrowUp, LoaderCircle } from "lucide-react";
 import { ApiError, createRun } from "@/lib/api";
 import { cx } from "@/lib/cx";
+import { redirectIfUnauthorized } from "@/lib/login-redirect";
 import type { GoalPreset } from "@/lib/presets";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -45,6 +46,7 @@ export function GoalComposer({ initialGoal = "" }: { initialGoal?: string }) {
       startNavigation(() => router.push(`/runs/${run.id}`));
       setCreating(false);
     } catch (caught) {
+      if (redirectIfUnauthorized(caught)) return; // the session ended: sign in again, then come back here
       setCreating(false);
       setError(caught instanceof ApiError ? (caught.detail ?? caught.message) : "The run could not be started. Try again.");
     }
