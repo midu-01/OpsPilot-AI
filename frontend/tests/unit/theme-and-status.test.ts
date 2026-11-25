@@ -7,6 +7,7 @@ import {
   humanizeStatus,
   isTerminalStatus,
   runStatusMeta,
+  toolCallStatusMeta,
   toolStatusMeta,
 } from "../../src/lib/status.ts";
 import { cx } from "../../src/lib/cx.ts";
@@ -52,4 +53,11 @@ test("terminal and stoppable statuses", () => {
 
 test("cx joins truthy class names", () => {
   assert.equal(cx("a", false, null, undefined, "b"), "a b");
+});
+
+test("a decided call that the worker has not resumed yet reads as resuming", () => {
+  assert.equal(toolCallStatusMeta("awaiting_approval", "approved").label, "Resuming");
+  assert.equal(toolCallStatusMeta("awaiting_approval", "pending").label, "Awaiting approval");
+  assert.equal(toolCallStatusMeta("completed", "approved").label, "Done");
+  assert.equal(toolCallStatusMeta("running").label, "Running");
 });
