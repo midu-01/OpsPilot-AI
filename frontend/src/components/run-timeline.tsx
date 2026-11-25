@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import MarkdownView from "./markdown-view";
-import type { MessageSnapshot, ToolCallSnapshot, ApprovalSnapshot, RunStatus } from "../lib/api";
+import type { ToolCallSnapshot, ApprovalSnapshot, RunStatus } from "../lib/api";
+import type { RunMessage } from "../lib/run-events";
 
 interface RunTimelineProps {
   goal: string;
   status: RunStatus;
-  messages: MessageSnapshot[];
+  messages: RunMessage[];
   toolCalls: ToolCallSnapshot[];
   approvals: ApprovalSnapshot[];
   error?: string | null;
@@ -45,7 +46,9 @@ export default function RunTimeline({
         }
 
         // Get any tool calls associated with this message
-        const attachedCalls = message.tool_calls.length > 0 ? message.tool_calls : [];
+        const attachedCalls = message.tool_call_ids
+          .map((id) => callMap.get(id))
+          .filter((call): call is ToolCallSnapshot => call !== undefined);
 
         return (
           <article key={message.id} className="timeline-item" aria-label={`Message ${message.index}`}>
@@ -105,7 +108,7 @@ export default function RunTimeline({
 
       {/* Standalone Tool Calls not linked to a specific assistant message */}
       {toolCalls
-        .filter((c) => !messages.some((m) => m.tool_calls.some((tc) => tc.id === c.id)))
+        .filter((c) => !messages.some((m) => m.tool_call_ids.includes(c.id)))
         .map((call) => (
           <article key={call.id} className="timeline-item" aria-label={`Tool Call ${call.name}`}>
             <header className="timeline-item-header">
