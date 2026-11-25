@@ -1,15 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, PanelRight } from "lucide-react";
 import type { RunSnapshot } from "@/lib/api";
 import { describeActivity, describeAnnouncement } from "@/lib/activity";
 import { isTerminalStatus } from "@/lib/status";
 import { buildTimeline, isTraceStreaming } from "@/lib/timeline";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { Sheet } from "@/components/ui/sheet";
 import { useFollowScroll } from "@/hooks/use-follow-scroll";
 import { BudgetMeters } from "./budget-meters";
+import { RunInspector } from "./inspector/run-inspector";
 import { RunHeader } from "./run-header";
 import { StatusBar } from "./status-bar";
 import { RunTrace } from "./trace/run-trace";
@@ -73,33 +75,63 @@ export function RunConsole({ initialSnapshot }: { initialSnapshot: RunSnapshot }
     refreshQuietly();
   }, [markStopping, refreshQuietly]);
 
+  // Smaller screens: the inspector opens in a bottom sheet from the status bar.
+  const inspectorSheet = (
+    <Sheet
+      title="Run inspector"
+      description="Overview, model calls and the event log."
+      trigger={
+        <Button size="sm" variant="secondary" className="xl:hidden">
+          <PanelRight aria-hidden />
+          Inspect
+        </Button>
+      }
+    >
+      <div className="flex h-[70dvh] flex-col">
+        <RunInspector state={state} live={live} onOpenModelCalls={refreshQuietly} />
+      </div>
+    </Sheet>
+  );
+
   return (
     <div className="space-y-5">
       <RunHeader state={state} />
-      <StatusBar state={state} activity={activity} connection={connection} onStopped={handleStopped} />
-      {notice ? (
-        <Alert
-          tone="warning"
-          role="status"
-          title="Your decision was not recorded"
-          action={
-            <Button size="sm" onClick={() => setNotice(null)}>
-              Dismiss
-            </Button>
-          }
-        >
-          {notice}
-        </Alert>
-      ) : null}
-      <BudgetMeters state={state} />
-      <div ref={traceRef} className="pt-2">
-        <RunTrace
-          state={state}
-          items={items}
-          streaming={isTraceStreaming(state)}
-          onDecided={refreshQuietly}
-          onConflict={handleConflict}
-        />
+      <StatusBar state={state} activity={activity} connection={connection} onStopped={handleStopped} actions={inspectorSheet} />
+
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <div className="min-w-0 space-y-5">
+          {notice ? (
+            <Alert
+              tone="warning"
+              role="status"
+              title="Your decision was not recorded"
+              action={
+                <Button size="sm" onClick={() => setNotice(null)}>
+                  Dismiss
+                </Button>
+              }
+            >
+              {notice}
+            </Alert>
+          ) : null}
+          <BudgetMeters state={state} />
+          <div ref={traceRef} className="pt-2">
+            <RunTrace
+              state={state}
+              items={items}
+              streaming={isTraceStreaming(state)}
+              onDecided={refreshQuietly}
+              onConflict={handleConflict}
+            />
+          </div>
+        </div>
+
+        {/* Wide screens: the inspector stays beside the trace, below the sticky status bar. */}
+        <aside aria-label="Run inspector" className="hidden xl:block">
+          <div className="sticky top-[7.75rem] flex max-h-[calc(100dvh-8.75rem)] flex-col overflow-hidden rounded-lg border border-border bg-surface">
+            <RunInspector state={state} live={live} onOpenModelCalls={refreshQuietly} />
+          </div>
+        </aside>
       </div>
 
       <p className="sr-only" aria-live="polite" aria-atomic="true">
