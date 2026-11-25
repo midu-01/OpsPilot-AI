@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agent.contracts import FakeProvider, LLMProvider, ModelEvent, ModelEventType, ProviderMessage, ToolDefinition
 from app.agent.worker import WORKER_LOCK, run_worker
-from app.models import Message, ModelCall, Run, ToolCall
+from app.models import Message, ModelCall, Run, ToolCall, User
 from app.runs.schemas import EventType, RunSnapshot, RunStatus
 from app.runs.service import create_run, get_snapshot
 
@@ -38,7 +38,7 @@ async def wait_status(sessions: Sessions, run_id: UUID, status: RunStatus) -> Ru
                 await asyncio.sleep(0.01)
 
 
-async def test_leader_preserves_live_work_and_drains_oldest_first(sessions: Sessions) -> None:
+async def test_leader_preserves_live_work_and_drains_oldest_first(sessions: Sessions, user: User) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     provider_names: list[tuple[str, str]] = []
@@ -57,8 +57,8 @@ async def test_leader_preserves_live_work_and_drains_oldest_first(sessions: Sess
         return PausingFake(), None
 
     async with sessions() as session:
-        first = await create_run(session, "First goal")
-        second = await create_run(session, "Second goal")
+        first = await create_run(session, user.id, "First goal")
+        second = await create_run(session, user.id, "Second goal")
         async with session.begin():
             for run_id, model in [(first.id, "first-model"), (second.id, "second-model")]:
                 run = await session.get_one(Run, run_id)
@@ -78,11 +78,11 @@ async def test_leader_preserves_live_work_and_drains_oldest_first(sessions: Sess
     assert provider_names == [("fake", "first-model"), ("fake", "second-model")]
 
 
-async def test_missing_key_is_reported_before_model_execution(sessions: Sessions) -> None:
+async def test_missing_key_is_reported_before_model_execution(sessions: Sessions, user: User) -> None:
     from app.agent.runtime import ProviderConfigurationError
 
     async with sessions() as session:
-        created = await create_run(session, "Missing provider key")
+        created = await create_run(session, user.id, "Missing provider key")
 
     def unavailable(name: str, model: str) -> tuple[LLMProvider, None]:
         raise ProviderConfigurationError("ANTHROPIC_API_KEY is missing. Set it in the server environment.")
@@ -95,11 +95,11 @@ async def test_missing_key_is_reported_before_model_execution(sessions: Sessions
     assert "ANTHROPIC_API_KEY" in str(failed.events[-1].payload["message"])
 
 
-async def test_recovery_preserves_trace_and_pending_approval(sessions: Sessions) -> None:
+async def test_recovery_preserves_trace_and_pending_approval(sessions: Sessions, user: User) -> None:
     async with sessions() as session:
-        active = await create_run(session, "Running at crash")
-        stopping = await create_run(session, "Stopping at crash")
-        paused = await create_run(session, "Waiting for approval")
+        active = await create_run(session, user.id, "Running at crash")
+        stopping = await create_run(session, user.id, "Stopping at crash")
+        paused = await create_run(session, user.id, "Waiting for approval")
         async with session.begin():
             for run_id, status in [
                 (active.id, RunStatus.running),
@@ -135,9 +135,11 @@ async def test_recovery_preserves_trace_and_pending_approval(sessions: Sessions)
         assert (await reader.get_one(ToolCall, call.id)).result is not None
 
 
-async def test_provider_resolution_failure_is_sanitized(sessions: Sessions, caplog: pytest.LogCaptureFixture) -> None:
+async def test_provider_resolution_failure_is_sanitized(
+    sessions: Sessions, user: User, caplog: pytest.LogCaptureFixture
+) -> None:
     async with sessions() as session:
-        run = await create_run(session, "Check failure")
+        run = await create_run(session, user.id, "Check failure")
 
     def broken(name: str, model: str) -> tuple[LLMProvider, None]:
         raise ValueError("private provider configuration")
@@ -148,7 +150,7 @@ async def test_provider_resolution_failure_is_sanitized(sessions: Sessions, capl
     assert "private provider configuration" not in failed.model_dump_json() + caplog.text
 
 
-async def test_lost_owner_stops_stream_before_queue_recovers(sessions: Sessions) -> None:
+async def test_lost_owner_stops_stream_before_queue_recovers(sessions: Sessions, user: User) -> None:
     streaming = asyncio.Event()
     closed = asyncio.Event()
 
@@ -164,8 +166,8 @@ async def test_lost_owner_stops_stream_before_queue_recovers(sessions: Sessions)
                 closed.set()
 
     async with sessions() as session:
-        interrupted = await create_run(session, "Interrupted by database connection loss")
-        next_run = await create_run(session, "Continue queue processing")
+        interrupted = await create_run(session, user.id, "Interrupted by database connection loss")
+        next_run = await create_run(session, user.id, "Continue queue processing")
 
     scripted = FakeProvider(
         [[ModelEvent(ModelEventType.text_delta, text="Done"), ModelEvent(ModelEventType.turn_complete)]]

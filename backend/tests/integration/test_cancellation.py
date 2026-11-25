@@ -12,6 +12,7 @@ from app.agent.loop import execute_run
 from app.models import Message, ModelCall, Order, Refund, Run
 from app.runs.schemas import EventType
 from app.runs.service import create_run, get_snapshot
+from tests.integration.accounts import create_user
 from tests.integration.test_approvals import ANSWER, END, decide, prepared, refund
 
 type Sessions = async_sessionmaker[AsyncSession]
@@ -38,8 +39,9 @@ async def test_stop_cancels_silent_stream_and_closes_trace(sessions: Sessions) -
             finally:
                 closed.set()
 
+    owner = await create_user(sessions)
     async with sessions() as session:
-        created = await create_run(session, "Wait for cancellation")
+        created = await create_run(session, owner.id, "Wait for cancellation")
         async with session.begin():
             (await session.get_one(Run, created.id)).status = "running"
     task = asyncio.create_task(execute_run(sessions, created.id, SilentProvider()))

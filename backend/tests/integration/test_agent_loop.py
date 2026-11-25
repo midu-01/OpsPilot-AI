@@ -17,6 +17,7 @@ from app.models import Message, ModelCall, Order, Refund, Run, RunEventRecord
 from app.runs.schemas import EventType, RunSnapshot
 from app.runs.service import create_run, get_snapshot
 from app.tools import ToolRegistry
+from tests.integration.accounts import create_user
 
 type Sessions = async_sessionmaker[AsyncSession]
 END = ModelEvent(type=ModelEventType.turn_complete)
@@ -25,8 +26,9 @@ USAGE = ModelEvent(type=ModelEventType.usage, input_tokens=10, output_tokens=3, 
 
 
 async def claimed(sessions: Sessions, **limits: int) -> UUID:
+    owner = await create_user(sessions)
     async with sessions() as session:
-        summary = await create_run(session, "Investigate late orders")
+        summary = await create_run(session, owner.id, "Investigate late orders")
         async with session.begin():
             run = await session.get_one(Run, summary.id)
             run.status = "running"

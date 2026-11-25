@@ -22,7 +22,7 @@ FIXED_SEED_DATE = date(2026, 2, 15)
 
 
 @pytest.fixture
-async def client(sessions: Sessions) -> AsyncClient:
+async def client(sessions: Sessions, user_headers: dict[str, str]) -> AsyncClient:
     async def isolated_session():
         async with sessions() as session:
             yield session
@@ -30,7 +30,7 @@ async def client(sessions: Sessions) -> AsyncClient:
     app.dependency_overrides[get_session] = isolated_session
     app.dependency_overrides[get_session_factory] = lambda: sessions
     try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=user_headers) as http:
             yield http
     finally:
         app.dependency_overrides.pop(get_session, None)
@@ -38,11 +38,7 @@ async def client(sessions: Sessions) -> AsyncClient:
 
 
 async def refund_rows_for_run(session: AsyncSession, run_id: UUID) -> list[Refund]:
-    query = (
-        select(Refund)
-        .join(ToolCall, ToolCall.id == Refund.tool_call_id)
-        .where(ToolCall.run_id == run_id)
-    )
+    query = select(Refund).join(ToolCall, ToolCall.id == Refund.tool_call_id).where(ToolCall.run_id == run_id)
     return list(await session.scalars(query))
 
 

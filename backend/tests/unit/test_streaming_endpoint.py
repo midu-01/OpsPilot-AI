@@ -10,9 +10,12 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.dependencies import get_current_user, get_sign_in_check
 from app.db import get_session
 from app.main import app
-from app.runs.events import get_broker
+from app.models import User
+from app.runs.events import KEEPALIVE_FRAME, get_broker, stream_events
+from app.runs.routes import require_run_owner
 from app.runs.schemas import EventType, RunEvent, RunStatus
 
 NOW = datetime.now(UTC)
@@ -76,10 +79,20 @@ def create_mock_app(mock_db: MockDb):
     return mock_session
 
 
+async def always_signed_in(session: AsyncSession) -> bool:
+    return True
+
+
 @pytest.fixture(autouse=True)
 def cleanup_overrides():
+    """These tests mock the database, so stand in for sign-in and ownership (both covered by integration tests)."""
+    signed_in = User(id=uuid4(), email="alex@opspilot.test", display_name="Alex Rivera", password_hash="unused")
+    app.dependency_overrides[get_current_user] = lambda: signed_in
+    app.dependency_overrides[require_run_owner] = lambda: None
+    app.dependency_overrides[get_sign_in_check] = lambda: always_signed_in
     yield
-    app.dependency_overrides.pop(get_session, None)
+    for dependency in (get_session, get_current_user, require_run_owner, get_sign_in_check):
+        app.dependency_overrides.pop(dependency, None)
 
 
 async def test_stream_unknown_run_returns_404() -> None:
@@ -272,4 +285,37 @@ async def test_two_subscribers_and_disconnect_cleanup(run_id: uuid4) -> None:
     assert run_id not in broker._subscribers
 
 
+async def test_stream_ends_at_the_next_keepalive_once_the_sign_in_is_invalid(run_id: uuid4) -> None:
+    events = [RunEvent(run_id=run_id, sequence=1, type=EventType.run_queued, occurred_at=NOW)]
+    mock_db = MockDb(run_id=run_id, status=RunStatus.running, next_seq=2, events=events)
+    mock_opener = create_mock_app(mock_db)
+    checked: list[AsyncSession] = []
 
+    async def valid_until_checked_twice(session: AsyncSession) -> bool:
+        checked.append(session)
+        return len(checked) < 2  # signed in for the first read, revoked by the next wake-up
+
+    stream = stream_events(mock_opener, run_id, 0, keepalive_timeout=0.05, is_authorized=valid_until_checked_twice)
+    chunks = await asyncio.wait_for(_collect(stream), timeout=1.0)
+
+    # No new events and no notify: the keepalive wake-up alone re-checked the sign-in and closed the stream.
+    assert len(chunks) == 2
+    assert "id: 1\nevent: run.queued" in chunks[0]
+    assert chunks[1] == KEEPALIVE_FRAME
+    assert len(checked) == 2 and all(session is not None for session in checked)
+    assert run_id not in get_broker()._subscribers
+
+
+async def test_stream_sends_nothing_when_the_sign_in_is_already_invalid(run_id: uuid4) -> None:
+    events = [RunEvent(run_id=run_id, sequence=1, type=EventType.run_queued, occurred_at=NOW)]
+    mock_opener = create_mock_app(MockDb(run_id=run_id, status=RunStatus.running, next_seq=2, events=events))
+
+    async def signed_out(session: AsyncSession) -> bool:
+        return False
+
+    stream = stream_events(mock_opener, run_id, 0, keepalive_timeout=0.05, is_authorized=signed_out)
+    assert await asyncio.wait_for(_collect(stream), timeout=1.0) == []
+
+
+async def _collect(stream: AsyncIterator[str]) -> list[str]:
+    return [chunk async for chunk in stream]

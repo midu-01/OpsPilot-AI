@@ -1,4 +1,5 @@
-"""Initialize the versioned local order fixtures (never overwriting existing records) and the policy index."""
+"""Initialize the demo data: demo users, versioned order fixtures (never overwriting existing records) and the
+policy index."""
 
 import argparse
 import asyncio
@@ -8,6 +9,8 @@ from datetime import UTC, date, datetime, time, timedelta
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.seed import seed_demo_users
+from app.config import settings
 from app.db import async_session_factory, engine
 from app.models import Order, SeedMetadata
 from app.search.embeddings import get_embedder
@@ -71,6 +74,9 @@ async def seed_orders(session: AsyncSession, reference: date) -> date:
 
 async def initialize(reference: date) -> None:
     try:
+        # Users first: the seed hands runs created before accounts existed to the first demo user.
+        async with async_session_factory.begin() as session:
+            await seed_demo_users(session, settings.demo_user_password.get_secret_value())
         async with async_session_factory.begin() as session:
             actual = await seed_orders(session, reference)
         first, end = previous_month(actual)

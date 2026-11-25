@@ -7,18 +7,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import get_session
 from app.main import app
+from app.models import User
 from app.runs.schemas import EventType
 from app.runs.service import append_event, create_run, get_snapshot
 
 
-async def test_run_survives_new_request_and_session(sessions: async_sessionmaker[AsyncSession]) -> None:
+async def test_run_survives_new_request_and_session(
+    sessions: async_sessionmaker[AsyncSession], user_headers: dict[str, str]
+) -> None:
     async def isolated_session() -> AsyncIterator[AsyncSession]:
         async with sessions() as session:
             yield session
 
     app.dependency_overrides[get_session] = isolated_session
     try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test", headers=user_headers
+        ) as client:
             first = await client.post("/runs", json={"goal": "Find delayed shipments"})
             assert first.status_code == 202
             run_id = first.json()["id"]
@@ -35,9 +40,11 @@ async def test_run_survives_new_request_and_session(sessions: async_sessionmaker
         del app.dependency_overrides[get_session]
 
 
-async def test_event_counter_rollback_and_concurrent_writers(sessions: async_sessionmaker[AsyncSession]) -> None:
+async def test_event_counter_rollback_and_concurrent_writers(
+    sessions: async_sessionmaker[AsyncSession], user: User
+) -> None:
     async with sessions() as session:
-        run = await create_run(session, "Check event ordering")
+        run = await create_run(session, user.id, "Check event ordering")
         await append_event(session, run.id, EventType.message_delta, {"text": "discarded"})
         await session.rollback()
 

@@ -12,27 +12,33 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import get_session
 from app.main import app
-from app.models import Approval, Message, Run, ToolCall
+from app.models import Approval, Message, Run, ToolCall, User
 from app.runs.service import create_run, get_snapshot
 
 
 @pytest.fixture
-async def client(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncClient]:
+async def client(
+    sessions: async_sessionmaker[AsyncSession], user_headers: dict[str, str]
+) -> AsyncIterator[AsyncClient]:
+    """Signed in as the `user` fixture, who owns every run that `proposal` creates in these tests."""
+
     async def isolated_session() -> AsyncIterator[AsyncSession]:
         async with sessions() as session:
             yield session
 
     app.dependency_overrides[get_session] = isolated_session
     try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=user_headers) as http:
             yield http
     finally:
         del app.dependency_overrides[get_session]
 
 
-async def proposal(sessions: async_sessionmaker[AsyncSession], status: str = "awaiting_approval") -> tuple[UUID, UUID]:
+async def proposal(
+    sessions: async_sessionmaker[AsyncSession], owner_id: UUID, status: str = "awaiting_approval"
+) -> tuple[UUID, UUID]:
     async with sessions() as session:
-        summary = await create_run(session, "Refund a delayed order")
+        summary = await create_run(session, owner_id, "Refund a delayed order")
     async with sessions.begin() as session:
         run = await session.get_one(Run, summary.id)
         run.status = status
@@ -59,9 +65,13 @@ async def proposal(sessions: async_sessionmaker[AsyncSession], status: str = "aw
 
 @pytest.mark.parametrize("decision,reason", [("approve", None), ("reject", "Outside policy")])
 async def test_concurrent_identical_decisions_requeue_once(
-    sessions: async_sessionmaker[AsyncSession], client: AsyncClient, decision: str, reason: str | None
+    sessions: async_sessionmaker[AsyncSession],
+    client: AsyncClient,
+    user: User,
+    decision: str,
+    reason: str | None,
 ) -> None:
-    run_id, approval_id = await proposal(sessions)
+    run_id, approval_id = await proposal(sessions, user.id)
     action = {"approval_id": str(approval_id), "decision": decision, "reason": reason}
     replies = await asyncio.gather(*(client.post(f"/runs/{run_id}/approve", json=action) for _ in range(3)))
     assert [reply.status_code for reply in replies] == [200, 200, 200]
@@ -78,9 +88,9 @@ async def test_concurrent_identical_decisions_requeue_once(
 
 
 async def test_conflicting_decisions_and_changed_reason_are_rejected(
-    sessions: async_sessionmaker[AsyncSession], client: AsyncClient
+    sessions: async_sessionmaker[AsyncSession], client: AsyncClient, user: User
 ) -> None:
-    run_id, approval_id = await proposal(sessions)
+    run_id, approval_id = await proposal(sessions, user.id)
     action = {"approval_id": str(approval_id), "decision": "reject", "reason": "Too expensive"}
     assert (await client.post(f"/runs/{run_id}/approve", json=action)).status_code == 200
     for conflicting in ({**action, "reason": "Changed reason"}, {**action, "decision": "approve", "reason": None}):
@@ -89,9 +99,9 @@ async def test_conflicting_decisions_and_changed_reason_are_rejected(
 
 @pytest.mark.parametrize("status", ["completed", "failed"])
 async def test_terminal_pending_decision_conflicts_but_exact_prior_decision_replays(
-    sessions: async_sessionmaker[AsyncSession], client: AsyncClient, status: str
+    sessions: async_sessionmaker[AsyncSession], client: AsyncClient, user: User, status: str
 ) -> None:
-    run_id, approval_id = await proposal(sessions, status)
+    run_id, approval_id = await proposal(sessions, user.id, status)
     action = {"approval_id": str(approval_id), "decision": "approve"}
     assert (await client.post(f"/runs/{run_id}/approve", json=action)).status_code == 409
     async with sessions.begin() as session:
@@ -103,12 +113,12 @@ async def test_terminal_pending_decision_conflicts_but_exact_prior_decision_repl
 
 
 async def test_missing_wrong_run_stale_and_invalid_approval_requests(
-    sessions: async_sessionmaker[AsyncSession], client: AsyncClient
+    sessions: async_sessionmaker[AsyncSession], client: AsyncClient, user: User
 ) -> None:
-    run_id, approval_id = await proposal(sessions, "queued")
+    run_id, approval_id = await proposal(sessions, user.id, "queued")
     action = {"approval_id": str(approval_id), "decision": "approve"}
     assert (await client.post(f"/runs/{uuid4()}/approve", json=action)).status_code == 404
-    other_id, _ = await proposal(sessions)
+    other_id, _ = await proposal(sessions, user.id)
     assert (await client.post(f"/runs/{other_id}/approve", json=action)).status_code == 404
     assert (
         await client.post(f"/runs/{run_id}/approve", json={**action, "approval_id": str(uuid4())})
@@ -123,9 +133,9 @@ async def test_missing_wrong_run_stale_and_invalid_approval_requests(
 
 @pytest.mark.parametrize("status", ["queued", "awaiting_approval"])
 async def test_stop_cancels_parked_work_and_pending_approval_once(
-    sessions: async_sessionmaker[AsyncSession], client: AsyncClient, status: str
+    sessions: async_sessionmaker[AsyncSession], client: AsyncClient, user: User, status: str
 ) -> None:
-    run_id, approval_id = await proposal(sessions, status)
+    run_id, approval_id = await proposal(sessions, user.id, status)
     responses = await asyncio.gather(*(client.post(f"/runs/{run_id}/stop") for _ in range(3)))
     assert all(response.status_code == 200 and response.json()["status"] == "cancelled" for response in responses)
     action = {"approval_id": str(approval_id), "decision": "approve"}
@@ -142,9 +152,9 @@ async def test_stop_cancels_parked_work_and_pending_approval_once(
 
 
 async def test_running_stop_signals_worker_and_terminal_stop_is_noop(
-    sessions: async_sessionmaker[AsyncSession], client: AsyncClient
+    sessions: async_sessionmaker[AsyncSession], client: AsyncClient, user: User
 ) -> None:
-    run_id, _ = await proposal(sessions, "running")
+    run_id, _ = await proposal(sessions, user.id, "running")
     for _ in range(2):
         response = await client.post(f"/runs/{run_id}/stop")
         assert response.status_code == 200 and response.json()["status"] == "cancelling"

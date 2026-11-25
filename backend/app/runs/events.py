@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import defaultdict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from uuid import UUID
 
@@ -121,12 +121,16 @@ async def stream_events(
     cursor: int,
     *,
     keepalive_timeout: float = 15.0,
+    is_authorized: Callable[[AsyncSession], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[str]:
     """Yield incremental SSE frames for run_id strictly after cursor.
 
     Reads bounded batches from PostgreSQL. Never executes or resumes the agent.
     Sends keepalive comments during quiet periods. Closes when the run reaches
     a terminal status and all events up to the terminal sequence have been delivered.
+
+    is_authorized is awaited with each fresh database session, i.e. before every batch and after every
+    keepalive wait, so a stream ends within one keepalive interval once its sign-in is revoked or expires.
     """
     broker = get_broker()
     sub_event = await broker.subscribe(run_id)
@@ -134,6 +138,8 @@ async def stream_events(
     try:
         while True:
             async with session_opener() as session:
+                if is_authorized is not None and not await is_authorized(session):
+                    break
                 events = await read_events(session, run_id, after=current_cursor, limit=100)
                 stream_info = await get_run_stream_info(session, run_id)
 
@@ -160,4 +166,3 @@ async def stream_events(
                 yield KEEPALIVE_FRAME
     finally:
         await broker.unsubscribe(run_id, sub_event)
-

@@ -3,17 +3,23 @@
 import os
 import sys
 from asyncio import create_subprocess_exec
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.db import get_session, get_session_factory
+from app.main import app
+from app.models import User
 from app.search.embeddings import HashingEmbedder
 from app.search.indexer import index_policies
+from tests.integration.accounts import bearer_headers, create_user
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
@@ -54,3 +60,44 @@ async def db_session(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterato
     async with sessions() as session:
         yield session
 
+
+@pytest.fixture
+def make_user(sessions: async_sessionmaker[AsyncSession]) -> Callable[..., Awaitable[User]]:
+    """Create an account in this test's database: `await make_user(email=..., display_name=...)`."""
+    return partial(create_user, sessions)
+
+
+@pytest.fixture
+def auth_headers(sessions: async_sessionmaker[AsyncSession]) -> Callable[[User], Awaitable[dict[str, str]]]:
+    """Sign a user in without the login endpoint: `await auth_headers(user)` gives the Authorization header."""
+    return partial(bearer_headers, sessions)
+
+
+@pytest.fixture
+async def user(make_user: Callable[..., Awaitable[User]]) -> User:
+    """One account, for tests that need a run owner."""
+    return await make_user()
+
+
+@pytest.fixture
+async def user_headers(user: User, auth_headers: Callable[[User], Awaitable[dict[str, str]]]) -> dict[str, str]:
+    """The Authorization header of `user`."""
+    return await auth_headers(user)
+
+
+@pytest.fixture
+async def api_client(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncClient]:
+    """The FastAPI app over ASGI, using this test's database. The worker does not start, so runs stay queued."""
+
+    async def isolated_session() -> AsyncIterator[AsyncSession]:
+        async with sessions() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = isolated_session
+    app.dependency_overrides[get_session_factory] = lambda: sessions
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+        app.dependency_overrides.pop(get_session_factory, None)

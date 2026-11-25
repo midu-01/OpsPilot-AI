@@ -13,7 +13,8 @@ from app.agent.contracts import ModelEvent, ModelEventType, ProviderMessage, Too
 from app.agent.loop import execute_run
 from app.db import get_session, get_session_factory
 from app.main import app
-from app.models import Run
+from app.models import Run, User
+from app.runs.events import get_broker
 from app.runs.schemas import EventType, RunEvent, RunStatus
 from app.runs.service import create_run, get_snapshot
 
@@ -102,14 +103,16 @@ def parse_sse_events(lines: list[str]) -> list[RunEvent]:
     return events
 
 
-async def test_streaming_early_event_before_finish_and_reconnect(sessions: Sessions, server: str) -> None:
+async def test_streaming_early_event_before_finish_and_reconnect(
+    sessions: Sessions, server: str, user: User, user_headers: dict[str, str]
+) -> None:
     """Assert a complete SSE frame arrives while the provider is still blocked on a real HTTP server."""
     pause_event = asyncio.Event()
     first_emitted = asyncio.Event()
     provider = ControllableProvider(pause_event, first_emitted)
 
     async with sessions() as session:
-        created = await create_run(session, "Stream live progress")
+        created = await create_run(session, user.id, "Stream live progress")
         run_id = created.id
         async with session.begin():
             run = await session.get_one(Run, run_id)
@@ -118,7 +121,7 @@ async def test_streaming_early_event_before_finish_and_reconnect(sessions: Sessi
     # Start execution in the background
     worker_task = asyncio.create_task(execute_run(sessions, run_id, provider))
 
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=10.0, headers=user_headers) as client:
         # Connect to stream while provider is blocked
         async with client.stream("GET", f"/runs/{run_id}/stream") as response:
             assert response.status_code == 200
@@ -180,14 +183,16 @@ async def test_streaming_early_event_before_finish_and_reconnect(sessions: Sessi
             assert precedence_resp.status_code == 204
 
 
-async def test_two_subscribers_and_disconnect_no_duplicate_execution(sessions: Sessions, server: str) -> None:
+async def test_two_subscribers_and_disconnect_no_duplicate_execution(
+    sessions: Sessions, server: str, user: User, user_headers: dict[str, str]
+) -> None:
     """Assert two subscribers can stream the same run without duplicate execution, and disconnect does not cancel."""
     pause_event = asyncio.Event()
     first_emitted = asyncio.Event()
     provider = ControllableProvider(pause_event, first_emitted)
 
     async with sessions() as session:
-        created = await create_run(session, "Two subscribers")
+        created = await create_run(session, user.id, "Two subscribers")
         run_id = created.id
         async with session.begin():
             run = await session.get_one(Run, run_id)
@@ -196,7 +201,7 @@ async def test_two_subscribers_and_disconnect_no_duplicate_execution(sessions: S
     worker_task = asyncio.create_task(execute_run(sessions, run_id, provider))
     await asyncio.wait_for(first_emitted.wait(), timeout=5.0)
 
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=10.0, headers=user_headers) as client:
         # Start subscriber 1
         sub1_stream = client.stream("GET", f"/runs/{run_id}/stream")
         resp1 = await sub1_stream.__aenter__()
@@ -235,16 +240,18 @@ async def test_two_subscribers_and_disconnect_no_duplicate_execution(sessions: S
             assert reconnected_events[0].sequence == last_seq
 
 
-async def test_stop_and_approval_are_independent_commands(sessions: Sessions, server: str) -> None:
+async def test_stop_and_approval_are_independent_commands(
+    sessions: Sessions, server: str, user: User, user_headers: dict[str, str]
+) -> None:
     """Confirm stop and approval endpoints work as separate HTTP commands independently of SSE stream."""
     async with sessions() as session:
-        created = await create_run(session, "Stop and stream test")
+        created = await create_run(session, user.id, "Stop and stream test")
         run_id = created.id
         async with session.begin():
             run = await session.get_one(Run, run_id)
             run.status = "queued"
 
-    async with httpx.AsyncClient(base_url=server, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=10.0, headers=user_headers) as client:
         # Connecting to stream must not start or resume the run
         async with client.stream("GET", f"/runs/{run_id}/stream") as stream:
             assert stream.status_code == 200
@@ -268,3 +275,31 @@ async def test_stop_and_approval_are_independent_commands(sessions: Sessions, se
         last_seq = events[-1].sequence
         recon = await client.get(f"/runs/{run_id}/stream", headers={"Last-Event-ID": str(last_seq)})
         assert recon.status_code == 204
+
+
+async def test_signing_out_ends_an_open_stream(
+    sessions: Sessions, server: str, user: User, user_headers: dict[str, str]
+) -> None:
+    """A revoked token stops the stream at its next wake-up, and reconnecting with it is refused."""
+    async with sessions() as session:
+        created = await create_run(session, user.id, "Watch until sign-out")
+
+    async with httpx.AsyncClient(base_url=server, timeout=10.0, headers=user_headers) as client:
+        async with client.stream("GET", f"/runs/{created.id}/stream") as stream:
+            assert stream.status_code == 200
+            lines = stream.aiter_lines()
+            first_frame: list[str] = []
+            async for line in lines:
+                first_frame.append(line)
+                if line == "":  # a blank line ends an SSE frame
+                    break
+            assert [event.type for event in parse_sse_events(first_frame)] == [EventType.run_queued]
+
+            assert (await client.post("/auth/logout")).status_code == 204
+            # Wake the stream now rather than waiting up to 15 s for its keepalive; either way it re-checks the token.
+            get_broker().notify(created.id)
+            # The read timeout (10 s) is shorter than the keepalive, so this only finishes if the server closed it.
+            rest = [line async for line in lines]
+
+        assert parse_sse_events(rest) == []
+        assert (await client.get(f"/runs/{created.id}/stream")).status_code == 401
