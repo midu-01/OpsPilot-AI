@@ -10,7 +10,6 @@ from app.tools.date_math import execute as date_math_execute
 from app.tools.issue_refund import REFUND_CAP_MINOR, calculate_refund_amount
 from app.tools.registry import get_registry
 from app.tools.search_policies import SearchPoliciesArgs
-from app.tools.search_policies import execute as search_execute
 
 registry = get_registry()
 
@@ -109,35 +108,35 @@ def test_date_math_missing_params(operation: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_search_policies_finds_refund_amount() -> None:
-    result = await search_execute(SearchPoliciesArgs(query="refund amount cap"))
-    assert len(result["matches"]) > 0
-    titles = [m["title"] for m in result["matches"]]
-    assert any("refund" in t.lower() for t in titles)
+# Ranking needs the pgvector index: see tests/integration/test_policy_search.py.
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"query": "  "},
+        {"query": "x" * 501},
+        {"query": "refund", "max_results": "1"},
+        {"query": "refund", "max_results": True},
+        {"query": "refund", "max_results": 0},
+        {"query": "refund", "max_results": 11},
+        {"query": "refund", "path": "/tmp"},
+    ],
+)
+def test_search_parameters_are_strict(arguments: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        SearchPoliciesArgs.model_validate(arguments)
 
 
-async def test_search_policies_finds_escalation() -> None:
-    result = await search_execute(SearchPoliciesArgs(query="escalation human approval"))
-    assert len(result["matches"]) > 0
+def test_search_arguments_strip_the_query_and_default_to_five_results() -> None:
+    args = SearchPoliciesArgs.model_validate({"query": "  late shipment refund  "})
+
+    assert (args.query, args.max_results) == ("late shipment refund", 5)
 
 
-async def test_search_policies_no_match() -> None:
-    result = await search_execute(SearchPoliciesArgs(query="xyznonexistent123"))
-    assert result["matches"] == []
-    assert "No policies matched" in result["message"]
+def test_search_tool_describes_hybrid_search_to_the_model() -> None:
+    [definition] = [item for item in registry.definitions() if item.name == "search_policies"]
 
-
-async def test_search_policies_respects_max_results() -> None:
-    result = await search_execute(SearchPoliciesArgs(query="refund", max_results=2))
-    assert len(result["matches"]) <= 2
-
-
-async def test_search_policies_returns_version_info() -> None:
-    result = await search_execute(SearchPoliciesArgs(query="shipping commitments"))
-    assert len(result["matches"]) > 0
-    match = result["matches"][0]
-    assert "version" in match
-    assert "id" in match
+    assert "pgvector" in definition.description and "why each policy matched" in definition.description
+    assert definition.requires_approval is False
 
 
 # ---------------------------------------------------------------------------

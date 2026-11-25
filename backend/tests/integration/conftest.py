@@ -1,4 +1,4 @@
-"""Give each integration test a freshly migrated, disposable PostgreSQL database."""
+"""Give each integration test a freshly migrated, disposable PostgreSQL database with the policy index built."""
 
 import os
 import sys
@@ -11,6 +11,9 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.search.embeddings import HashingEmbedder
+from app.search.indexer import index_policies
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
@@ -33,7 +36,11 @@ async def sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
                 sys.executable, "-m", "alembic", "upgrade", "head", cwd=BACKEND_ROOT, env=env
             )
             assert await proc.wait() == 0, "Alembic failed on a fresh database"
-            yield async_sessionmaker(engine, expire_on_commit=False)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            # Like a seeded deployment, every test database can answer search_policies (agent-loop tests included).
+            async with factory.begin() as session:
+                await index_policies(session, HashingEmbedder())
+            yield factory
         finally:
             await engine.dispose()
             async with admin.connect() as conn:
@@ -46,3 +53,4 @@ async def sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 async def db_session(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncSession]:
     async with sessions() as session:
         yield session
+

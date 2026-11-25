@@ -1,4 +1,4 @@
-"""Initialize the versioned local order fixtures without overwriting existing records."""
+"""Initialize the versioned local order fixtures (never overwriting existing records) and the policy index."""
 
 import argparse
 import asyncio
@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import async_session_factory, engine
 from app.models import Order, SeedMetadata
+from app.search.embeddings import get_embedder
+from app.search.indexer import index_policies
 
 SEED_KEY = "demo-orders-v1"
 
@@ -76,6 +78,11 @@ async def initialize(reference: date) -> None:
             f"Demo reference date: {actual} UTC. Example goal: Find late shipments over $500 "
             f"from {first} (inclusive) to {end} (exclusive) and draft refund emails."
         )
+        # Synced from the bundled files on every start; paragraphs that did not change are not embedded again.
+        embedder = get_embedder()
+        async with async_session_factory.begin() as session:
+            report = await index_policies(session, embedder)
+        print(f"Policy index ({embedder.name}): {report}.")
     finally:
         await engine.dispose()
 
