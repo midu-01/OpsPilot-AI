@@ -7,7 +7,7 @@ import { cx } from "@/lib/cx";
 import { errorTitle } from "@/lib/error-codes";
 import { formatDuration } from "@/lib/format";
 import { toolCallDurationMs } from "@/lib/run-metrics";
-import { approvalStatusMeta, toolStatusMeta } from "@/lib/status";
+import { approvalStatusMeta, toolCallStatusMeta, type Tone } from "@/lib/status";
 import { parseToolResult } from "@/lib/tool-data";
 import { summarizeToolCall, summarizeToolResult } from "@/lib/tool-summaries";
 import { Alert } from "@/components/ui/alert";
@@ -44,7 +44,7 @@ export const ToolCallCard = memo(function ToolCallCard({ call, approval, timeZon
   const bodyId = useId();
 
   const { icon: Icon, ResultView } = getToolView(call.name);
-  const status = toolStatusMeta(call.status);
+  const status = toolCallStatusMeta(call.status, approval?.status);
   // An approved call's duration would include the human review, so it is not shown.
   const durationMs = approval ? null : toolCallDurationMs(call);
   const resultSummary = summarizeToolResult(call.name, result);
@@ -110,10 +110,18 @@ export const ToolCallCard = memo(function ToolCallCard({ call, approval, timeZon
   );
 });
 
+/** A stop or a reviewer's rejection is a deliberate outcome, not an error, so it is not red. */
+const DELIBERATE_OUTCOMES: Record<string, Tone> = {
+  APPROVAL_REJECTED: "warning",
+  APPROVAL_CANCELLED: "neutral",
+  RUN_CANCELLED: "neutral",
+  CANCELLED: "neutral",
+};
+
 function FailureNotice({ code, message }: { code: string; message: string }) {
   return (
     <Alert
-      tone="danger"
+      tone={DELIBERATE_OUTCOMES[code] ?? "danger"}
       title={
         <span className="flex flex-wrap items-center gap-2">
           {errorTitle(code)}

@@ -65,6 +65,17 @@ export function toolStatusMeta(status: string): StatusMeta {
   return TOOL_STATUS[status] ?? fallback(status);
 }
 
+/**
+ * Status shown on a tool card. The backend keeps an approved or rejected call in
+ * "awaiting_approval" until the worker resumes the run, so that gap reads "Resuming".
+ */
+export function toolCallStatusMeta(status: string, approvalStatus?: string): StatusMeta {
+  if (status === "awaiting_approval" && approvalStatus && approvalStatus !== "pending") {
+    return { label: "Resuming", tone: "info", icon: "running" };
+  }
+  return toolStatusMeta(status);
+}
+
 export function approvalStatusMeta(status: string): StatusMeta {
   return APPROVAL_STATUS[status as ApprovalStatus] ?? fallback(status);
 }
