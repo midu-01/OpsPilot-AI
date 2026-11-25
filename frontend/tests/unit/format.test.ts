@@ -13,6 +13,7 @@ import {
   formatTime,
   lateness,
   plural,
+  truncate,
 } from "../../src/lib/format.ts";
 import { errorTitle } from "../../src/lib/error-codes.ts";
 
@@ -87,4 +88,10 @@ test("error codes get short titles and unknown codes stay readable", () => {
   assert.equal(errorTitle("APPROVAL_REJECTED"), "Rejected by reviewer");
   assert.equal(errorTitle("SOMETHING_NEW"), "Something new");
   assert.equal(errorTitle(null), "Unexpected error");
+});
+
+test("truncate shortens on a word boundary", () => {
+  assert.equal(truncate("Find orders over $500 that shipped late last month", 30), "Find orders over $500 that…");
+  assert.equal(truncate("  short   goal ", 30), "short goal");
+  assert.equal(truncate("abcdefghijklmnopqrstuvwxyz", 10), "abcdefghi…");
 });

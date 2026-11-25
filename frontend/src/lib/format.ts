@@ -13,6 +13,15 @@ export function formatCount(value: number): string {
   return countFormat.format(value);
 }
 
+/** Shortens text to `max` characters on a word boundary, adding an ellipsis. */
+export function truncate(text: string, max: number): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (clean.length <= max) return clean;
+  const cut = clean.slice(0, max - 1);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
+
 /** plural(1, "turn") -> "1 turn"; plural(3, "policy", "policies") -> "3 policies". */
 export function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return `${formatCount(count)} ${count === 1 ? singular : pluralForm}`;

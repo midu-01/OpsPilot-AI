@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes } from "react";
+import type { ComponentProps } from "react";
 import { cx } from "@/lib/cx";
 
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "danger-outline";
@@ -28,7 +28,8 @@ export function buttonClasses(variant: ButtonVariant = "secondary", size: Button
   return cx(BASE, VARIANTS[variant], SIZES[size], className);
 }
 
-interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+/** React 19 passes `ref` as a normal prop, so ComponentProps<"button"> includes it. */
+interface ButtonProps extends ComponentProps<"button"> {
   variant?: ButtonVariant;
   size?: ButtonSize;
 }
