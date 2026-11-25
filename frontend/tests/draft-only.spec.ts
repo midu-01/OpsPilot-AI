@@ -1,56 +1,27 @@
-import { test, expect } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { startPreset, traceSteps } from "./helpers";
 
-test.describe("Draft-only Operations Journey", () => {
-  test("submits draft goal, observes read tools, verifies email drafts, and confirms zero approvals", async ({
-    page,
-  }) => {
-    // 1. Open home page
-    await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Agent Run Console" })).toBeVisible();
+test("a draft-only goal runs read tools in turn order, renders email drafts and never asks for approval", async ({ page }) => {
+  await startPreset(page, /Draft late-shipment emails/);
+  await expect(page.getByRole("heading", { name: "Run completed" })).toBeVisible({ timeout: 20_000 });
 
-    // 2. Select the draft-only example prompt or fill it
-    const draftPromptBtn = page.getByRole("button", {
-      name: /Select example: Draft-only late shipment analysis/i,
-    });
-    if (await draftPromptBtn.isVisible()) {
-      await draftPromptBtn.click();
-    } else {
-      await page
-        .getByLabel(/Operations Goal/i)
-        .fill("Find orders over $500 that shipped late last month and draft a refund email for each.");
-    }
+  // Each tool call sits under the turn that requested it, and the answer comes last.
+  expect(await traceSteps(page)).toEqual(["Goal", "Turn 1", "Turn 2", "Turn 3", "Answer", "Run completed"]);
+  const feed = page.getByRole("feed", { name: "Trace" });
+  await expect(feed.getByRole("article", { name: "Turn 1" })).toContainText("date_math");
+  await expect(feed.getByRole("article", { name: "Turn 2" })).toContainText("Late orders over $500.00, shipped Jan 1 – Feb 1, 2026");
+  await expect(feed.getByRole("article", { name: "Turn 3" })).toContainText("search_policies");
 
-    // 3. Submit the goal
-    await page.getByRole("button", { name: /Run OpsPilot Agent/i }).click();
+  await expect(page.getByRole("article", { name: "Draft Email 1" })).toContainText("Subject");
+  await expect(page.getByText(/EMAIL-01/).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Approve refund" })).toHaveCount(0);
 
-    // 4. Wait for navigation to the run detail page
-    await page.waitForURL(/\/runs\/[0-9a-f-]+/);
-    const runUrl = page.url();
+  // The query_orders view shows the orders table with lateness.
+  await feed.getByRole("button", { name: /query_orders/ }).click();
+  await expect(feed.getByRole("table", { name: "Orders returned by query_orders" })).toContainText("ORD-1001");
 
-    // 5. Ensure execution timeline is present
-    await expect(page.getByRole("feed", { name: /Execution Timeline/i })).toBeVisible();
-
-    // 6. Wait for run to reach completed status
-    await expect(page.getByText(/Run Completed/i)).toBeVisible({ timeout: 20000 });
-
-    // 7. Verify no approval card was shown
-    await expect(page.locator(".approval-card")).not.toBeVisible();
-
-    // 8. Verify the assistant response contains drafted email content
-    await expect(page.getByText(/Subject:/i)).toBeVisible();
-    await expect(page.getByText(/EMAIL-01/i)).toBeVisible();
-
-    // 9. Revisit Run History
-    await page.getByRole("link", { name: /Runs History/i }).click();
-    await page.waitForURL(/\/runs$/);
-
-    // 10. Find the completed run
-    const viewTraceLink = page.locator("tr", { hasText: "completed" }).first().getByRole("link", { name: /View Trace/i });
-    await expect(viewTraceLink).toBeVisible();
-
-    // 11. Reopen the run trace
-    await viewTraceLink.click();
-    await expect(page.getByText(/Run Completed/i)).toBeVisible();
-    await expect(page.locator(".approval-card")).not.toBeVisible();
-  });
+  // A full reload replays the stored trace with the same structure.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Run completed" })).toBeVisible();
+  expect(await traceSteps(page)).toEqual(["Goal", "Turn 1", "Turn 2", "Turn 3", "Answer", "Run completed"]);
 });

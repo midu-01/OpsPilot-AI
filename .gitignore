@@ -23,6 +23,9 @@ __pycache__/
 *.log
 
 # Local tool caches
+frontend/test-results/
+frontend/playwright-report/
+frontend/screenshots/
 *.tsbuildinfo
 .pytest_cache/
 .ruff_cache/
