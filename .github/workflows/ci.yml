@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend Lint, Types & Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        # The same image as compose.yaml: migrations create the pgvector extension.
+        image: pgvector/pgvector:0.8.7-pg17-bookworm
+        env:
+          POSTGRES_USER: opspilot
+          POSTGRES_PASSWORD: opspilot_test
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.0"
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        working-directory: backend
+        run: uv sync --locked
+
+      - name: Run linter
+        working-directory: backend
+        run: uv run ruff check .
+
+      - name: Run type checker
+        working-directory: backend
+        run: uv run mypy app
+
+      - name: Run tests with coverage
+        working-directory: backend
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://opspilot:opspilot_test@127.0.0.1:5432/postgres
+          LLM_PROVIDER: fake
+        run: |
+          uv run pytest -ra --cov=app --cov-report=term-missing --cov-fail-under=80 --junitxml="$RUNNER_TEMP/backend.xml"
+
+      - name: Verify required integration tests were executed and not skipped
+        run: |
+          python -c "
+          import xml.etree.ElementTree as ET, os, sys
+          xml_path = os.path.join(os.environ['RUNNER_TEMP'], 'backend.xml')
+          tree = ET.parse(xml_path)
+          root = tree.getroot()
+          required_files = ['test_scenario_reliability', 'test_streaming']
+          for req in required_files:
+              cases = [tc for tc in root.findall('.//testcase') if req in tc.attrib.get('classname', '')]
+              if not cases:
+                  print(f'Error: No test cases found for {req}', file=sys.stderr)
+                  sys.exit(1)
+              skipped = [tc.attrib['name'] for tc in cases if tc.find('skipped') is not None]
+              if skipped:
+                  print(f'Error: Required test cases in {req} were skipped: {skipped}', file=sys.stderr)
+                  sys.exit(1)
+          print('All required integration tests ran successfully with zero skips.')
+          "
+
+  frontend:
+    name: Frontend Lint, Types & Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11.15.1"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        working-directory: frontend
+        run: pnpm lint
+
+      - name: Type check
+        working-directory: frontend
+        run: pnpm typecheck
+
+      - name: Run unit tests
+        working-directory: frontend
+        run: pnpm test
+
+      - name: Build production Next.js
+        working-directory: frontend
+        run: pnpm build
+
+  compose-e2e:
+    name: Isolated Docker Compose E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11.15.1"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers with OS dependencies
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Start isolated Compose stack
+        run: |
+          P8_PROJECT="opspilot-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "P8_PROJECT=${P8_PROJECT}" >> "$GITHUB_ENV"
+          docker compose --env-file .env.example -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml config --quiet
+          docker compose --env-file .env.example -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml up --build --wait --wait-timeout 180 -d
+          curl -fsS http://127.0.0.1:18000/health/ready
+          curl -fsS -o /dev/null http://127.0.0.1:13000/
+          COUNT=$(docker compose -p "$P8_PROJECT" exec -T db psql -U opspilot -d opspilot -Atc 'SELECT count(*) FROM orders')
+          echo "Seeded orders count: $COUNT"
+          test "$COUNT" = "30"
+
+      - name: Run browser E2E journeys
+        working-directory: frontend
+        env:
+          E2E_EXTERNAL_STACK: "1"
+        # The whole suite, as in the README. The setup project signs in the demo users first;
+        # playwright.config.ts already runs one worker with no retries.
+        run: pnpm exec playwright test
+
+      - name: Teardown isolated Compose stack
+        if: always()
+        run: |
+          if [ -n "$P8_PROJECT" ]; then
+            docker compose -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml down -v --remove-orphans || true
+          fi
