@@ -26,7 +26,7 @@ const EventRow = memo(function EventRow({ event, timeZone }: { event: RunEvent; 
  * applied. The sequence number is the SSE `id`; the stream resumes after the last one.
  */
 export function EventsTab({ events, timeZone }: { events: RunEvent[]; timeZone: string }) {
-  const list = useRef<HTMLOListElement>(null);
+  const list = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
 
   // Keep the newest event in view while the reader is at the bottom of the list.
@@ -40,19 +40,23 @@ export function EventsTab({ events, timeZone }: { events: RunEvent[]; timeZone: 
       <p className="border-b border-border px-4 py-2 text-xs text-muted">
         Sequence numbers are the SSE event ids. Times are {timeZone}.
       </p>
-      <ol
+      <div
         ref={list}
+        tabIndex={0}
+        role="region"
         aria-label="Run events"
         onScroll={(event) => {
           const node = event.currentTarget;
           atBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 40;
         }}
-        className="min-h-0 flex-1 divide-y divide-border overflow-y-auto"
+        className="min-h-0 flex-1 overflow-y-auto"
       >
-        {events.map((event) => (
-          <EventRow key={event.sequence} event={event} timeZone={timeZone} />
-        ))}
-      </ol>
+        <ol className="divide-y divide-border">
+          {events.map((event) => (
+            <EventRow key={event.sequence} event={event} timeZone={timeZone} />
+          ))}
+        </ol>
+      </div>
     </div>
   );
 }

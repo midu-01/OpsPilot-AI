@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { ApiError, checkReadiness, createRun, getApiBaseUrl, getStreamUrl } from "../../src/lib/api.ts";
+import { ApiError, checkReadiness, createRun, getApiBaseUrl, getRun, getStreamUrl } from "../../src/lib/api.ts";
 
 function browserAt(t: TestContext, origin: string) {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -45,7 +45,8 @@ test("stream replay and browser readiness use the same API prefix", async (t) =>
     return Response.json({ status: "ready", details: { database: "connected" } });
   });
 
-  assert.equal(getStreamUrl("run-id", 12), "http://127.0.0.1:13000/api/runs/run-id/stream?after=12");
+  const runId = "01234567-89ab-4cde-8fab-0123456789ab";
+  assert.equal(getStreamUrl(runId, 12), `http://127.0.0.1:13000/api/runs/${runId}/stream?after=12`);
   assert.equal(await checkReadiness(getApiBaseUrl()), true);
   assert.equal(requestedUrl, "http://127.0.0.1:13000/api/health/ready");
 });
@@ -99,4 +100,24 @@ test("explicit request cancellation remains an AbortError", async (t) => {
   });
 
   await assert.rejects(createRun("Cancelled request", { signal: controller.signal }), { name: "AbortError" });
+});
+
+test("a run ID that is not a UUID is rejected before any request", async (t) => {
+  browserAt(t, "http://localhost:3000");
+  const fetchMock = t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  for (const id of ["..", ".", "../health/ready", "not-a-uuid"]) {
+    await assert.rejects(getRun(id), (error: unknown) => error instanceof ApiError && error.status === 422);
+    assert.throws(() => getStreamUrl(id), (error: unknown) => error instanceof ApiError && error.status === 422);
+  }
+  assert.equal(fetchMock.mock.callCount(), 0);
+});
+
+test("a body that is not JSON, or a snapshot missing its trace, becomes a 502 ApiError", async (t) => {
+  browserAt(t, "http://localhost:3000");
+  const runId = "01234567-89ab-4cde-8fab-0123456789ab";
+  t.mock.method(globalThis, "fetch", async () => new Response("<html>", { status: 200 }));
+  await assert.rejects(getRun(runId), (error: unknown) => error instanceof ApiError && error.status === 502);
+  t.mock.restoreAll();
+  t.mock.method(globalThis, "fetch", async () => Response.json({ id: runId, messages: [] }));
+  await assert.rejects(getRun(runId), (error: unknown) => error instanceof ApiError && error.status === 502);
 });

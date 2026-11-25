@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type KeyboardEvent } from "react";
 import { LoaderCircle, Square } from "lucide-react";
 import { ApiError, stopRun, type RunStatus } from "@/lib/api";
 import { canStop } from "@/lib/status";
@@ -15,15 +15,18 @@ interface StopControlProps {
 /**
  * Stop with a light, inline confirmation (stopping cancels a pending approval).
  * A running run reports "cancelling" until the worker reaches a checkpoint.
+ * Focus follows the flow: Stop -> "Keep running" -> "Stopping…".
  */
 export function StopControl({ runId, status, onStopped }: StopControlProps) {
   const [phase, setPhase] = useState<"idle" | "confirming" | "sending">("idle");
-  const [returnFocus, setReturnFocus] = useState(false);
+  // Which control should take focus when it appears (set only by user actions).
+  const [focusOnMount, setFocusOnMount] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (status === "cancelling") {
+  // One element for "sending" and "cancelling", so focus stays on it when the status changes.
+  if (phase === "sending" || status === "cancelling") {
     return (
-      <Button size="sm" variant="secondary" disabled>
+      <Button size="sm" variant="secondary" aria-disabled autoFocus={focusOnMount}>
         <LoaderCircle aria-hidden className="motion-safe:animate-spin" />
         Stopping…
       </Button>
@@ -39,14 +42,17 @@ export function StopControl({ runId, status, onStopped }: StopControlProps) {
       onStopped();
     } catch (caught) {
       setError(caught instanceof ApiError && caught.status !== 0 ? (caught.detail ?? caught.message) : "Could not reach the backend to stop the run.");
-    } finally {
       setPhase("idle");
     }
   }
 
   function keepRunning() {
     setPhase("idle");
-    setReturnFocus(true);
+    setFocusOnMount(true);
+  }
+
+  function onConfirmKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") keepRunning();
   }
 
   if (phase === "idle") {
@@ -57,7 +63,15 @@ export function StopControl({ runId, status, onStopped }: StopControlProps) {
             {error}
           </span>
         ) : null}
-        <Button size="sm" variant="danger-outline" autoFocus={returnFocus} onClick={() => setPhase("confirming")}>
+        <Button
+          size="sm"
+          variant="danger-outline"
+          autoFocus={focusOnMount}
+          onClick={() => {
+            setFocusOnMount(true);
+            setPhase("confirming");
+          }}
+        >
           <Square aria-hidden />
           Stop
         </Button>
@@ -66,14 +80,14 @@ export function StopControl({ runId, status, onStopped }: StopControlProps) {
   }
 
   return (
-    <div role="group" aria-label="Confirm stop" className="flex flex-wrap items-center gap-2">
+    <div role="group" aria-label="Confirm stop" onKeyDown={onConfirmKeyDown} className="flex flex-wrap items-center gap-2">
       <span className="text-ui text-muted">
         {status === "awaiting_approval" ? "Stop and cancel the pending approval?" : "Stop this run?"}
       </span>
-      <Button size="sm" variant="danger" autoFocus onClick={stop} disabled={phase === "sending"}>
-        {phase === "sending" ? "Stopping…" : "Stop run"}
+      <Button size="sm" variant="danger" onClick={stop}>
+        Stop run
       </Button>
-      <Button size="sm" variant="ghost" onClick={keepRunning} disabled={phase === "sending"}>
+      <Button size="sm" variant="ghost" autoFocus onClick={keepRunning}>
         Keep running
       </Button>
     </div>

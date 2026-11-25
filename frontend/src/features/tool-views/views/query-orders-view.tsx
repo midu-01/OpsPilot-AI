@@ -61,7 +61,7 @@ export function QueryOrdersView({ call, data, timeZone }: ToolViewProps) {
       {result.orders.length === 0 ? (
         <p className="text-sm text-muted">No orders matched these filters.</p>
       ) : (
-        <div className="overflow-x-auto rounded-md border border-border">
+        <div tabIndex={0} role="region" aria-label="Orders" className="overflow-x-auto rounded-md border border-border">
           <table className="w-full min-w-[36rem] text-left text-ui">
             <caption className="sr-only">Orders returned by query_orders</caption>
             <thead className="bg-surface-2 text-xs text-muted">

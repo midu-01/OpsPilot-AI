@@ -25,12 +25,18 @@ export function buildTimeline(state: RunState): TimelineItem[] {
   const turns = state.messages.filter((message) => message.role === "assistant");
   const placedApprovals = new Set<string>();
 
+  // A turn that streams text and then requests tools: the calls arrive before the
+  // message completes. Show them in that turn rather than as a separate one.
+  const streamingTurn = turns.at(-1)?.status === "streaming" ? turns.at(-1) : undefined;
+  const pending = state.pending_tool_call_ids;
+
   turns.forEach((message, index) => {
     if (isFinalAnswer(state, message, index === turns.length - 1)) {
       items.push({ kind: "answer", key: "answer", message });
       return;
     }
-    items.push({ kind: "turn", key: `turn-${index + 1}`, turn: index + 1, message, callIds: message.tool_call_ids });
+    const callIds = message === streamingTurn && pending.length > 0 ? [...message.tool_call_ids, ...pending] : message.tool_call_ids;
+    items.push({ kind: "turn", key: `turn-${index + 1}`, turn: index + 1, message, callIds });
     for (const approval of state.approvals) {
       if (message.tool_call_ids.includes(approval.tool_call_id)) {
         items.push({ kind: "approval", key: `approval-${approval.id}`, approval });
@@ -39,10 +45,10 @@ export function buildTimeline(state: RunState): TimelineItem[] {
     }
   });
 
-  // Calls requested by a turn whose message has not completed yet.
-  if (state.pending_tool_call_ids.length > 0) {
+  // Calls requested by a tool-only turn whose message has not completed yet.
+  if (pending.length > 0 && !streamingTurn) {
     const turn = turns.length + 1;
-    items.push({ kind: "turn", key: `turn-${turn}`, turn, message: null, callIds: state.pending_tool_call_ids });
+    items.push({ kind: "turn", key: `turn-${turn}`, turn, message: null, callIds: pending });
   }
 
   for (const approval of state.approvals) {
@@ -66,7 +72,7 @@ function isFinalAnswer(state: RunState, message: RunMessage, isLastTurn: boolean
   );
 }
 
-/** True while new trace content may still arrive (drives aria-busy on the feed). */
-export function isTraceStreaming(state: RunState): boolean {
-  return state.status === "running" || state.status === "cancelling" || state.status === "queued";
+/** True while a message's text is arriving (aria-busy on the feed, so screen readers wait for it). */
+export function isTextStreaming(state: RunState): boolean {
+  return state.messages.some((message) => message.status === "streaming");
 }

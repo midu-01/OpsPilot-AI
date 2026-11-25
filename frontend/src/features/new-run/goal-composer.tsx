@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useId, useRef, useState, useTransition, type FormEvent, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUp, LoaderCircle } from "lucide-react";
 import { ApiError, createRun } from "@/lib/api";
@@ -21,7 +21,10 @@ const MAX_GOAL_LENGTH = 2000;
 export function GoalComposer({ initialGoal = "" }: { initialGoal?: string }) {
   const router = useRouter();
   const [goal, setGoal] = useState(initialGoal);
-  const [submitting, setSubmitting] = useState(false);
+  const [creating, setCreating] = useState(false);
+  // The navigation to the new run is a transition, so "Starting…" lasts until the console shows.
+  const [navigating, startNavigation] = useTransition();
+  const submitting = creating || navigating;
   const [error, setError] = useState<string | null>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const id = useId();
@@ -35,13 +38,14 @@ export function GoalComposer({ initialGoal = "" }: { initialGoal?: string }) {
       textarea.current?.focus();
       return;
     }
-    setSubmitting(true);
+    setCreating(true);
     setError(null);
     try {
       const run = await createRun(trimmed);
-      router.push(`/runs/${run.id}`); // keep the pending state until the console opens
+      startNavigation(() => router.push(`/runs/${run.id}`));
+      setCreating(false);
     } catch (caught) {
-      setSubmitting(false);
+      setCreating(false);
       setError(caught instanceof ApiError ? (caught.detail ?? caught.message) : "The run could not be started. Try again.");
     }
   }
@@ -66,7 +70,7 @@ export function GoalComposer({ initialGoal = "" }: { initialGoal?: string }) {
 
   return (
     <div className="space-y-6">
-      <form onSubmit={onSubmit} className="rounded-xl border border-border-strong bg-surface shadow-sm focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring">
+      <form onSubmit={onSubmit} className="rounded-xl border border-input-border bg-surface shadow-sm focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-ring">
         <label htmlFor={`${id}-goal`} className="block px-4 pt-3 text-xs font-medium text-muted">
           Operations goal
         </label>

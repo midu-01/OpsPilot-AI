@@ -8,9 +8,11 @@ test("stopping a run that waits for approval cancels the approval and keeps the 
   await page.getByRole("button", { name: "Stop", exact: true }).click();
   const confirm = page.getByRole("group", { name: "Confirm stop" });
   await expect(confirm).toContainText("Stop and cancel the pending approval?");
+  await expect(confirm.getByRole("button", { name: "Keep running" })).toBeFocused(); // the safe choice first
   await confirm.getByRole("button", { name: "Stop run" }).click();
 
   await expect(page.getByRole("heading", { name: "Run stopped" })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole("article", { name: "Run stopped" })).toBeFocused();
   await expect(page.getByRole("heading", { name: "Approval cancelled" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Approve refund" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0);

@@ -194,7 +194,22 @@ async function request<T>(
     throw new ApiError(response.status, `Request failed (${response.status}): ${detail || response.statusText}`, detail);
   }
 
-  return response.json();
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new ApiError(502, "The backend returned a response that is not JSON.");
+  }
+}
+
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Path for one run. IDs come from the URL, so anything that is not a UUID is rejected
+ * here with the same 422 the backend would send (this also stops "." and ".." segments).
+ */
+function runPath(runId: string, suffix = ""): string {
+  if (!RUN_ID.test(runId)) throw new ApiError(422, "Invalid run ID", "Invalid run ID");
+  return `/runs/${runId}${suffix}`;
 }
 
 export async function createRun(goal: string, options?: { signal?: AbortSignal }): Promise<RunSummary> {
@@ -217,10 +232,15 @@ export async function listRuns(
 }
 
 export async function getRun(runId: string, options?: { signal?: AbortSignal }): Promise<RunSnapshot> {
-  return request<RunSnapshot>(`/runs/${encodeURIComponent(runId)}`, {
+  const snapshot = await request<RunSnapshot>(runPath(runId), {
     method: "GET",
     signal: options?.signal,
   });
+  // The console builds its state from these fields; fail clearly if they are missing.
+  if (!Array.isArray(snapshot?.messages) || !Array.isArray(snapshot.events) || !Number.isSafeInteger(snapshot.snapshot_cursor)) {
+    throw new ApiError(502, "The backend returned an unexpected run snapshot.");
+  }
+  return snapshot;
 }
 
 export async function decideApproval(
@@ -230,7 +250,7 @@ export async function decideApproval(
   reason?: string | null,
   options?: { signal?: AbortSignal }
 ): Promise<RunSummary> {
-  return request<RunSummary>(`/runs/${encodeURIComponent(runId)}/approve`, {
+  return request<RunSummary>(runPath(runId, "/approve"), {
     method: "POST",
     body: JSON.stringify({
       approval_id: approvalId,
@@ -242,14 +262,14 @@ export async function decideApproval(
 }
 
 export async function stopRun(runId: string, options?: { signal?: AbortSignal }): Promise<RunSummary> {
-  return request<RunSummary>(`/runs/${encodeURIComponent(runId)}/stop`, {
+  return request<RunSummary>(runPath(runId, "/stop"), {
     method: "POST",
     signal: options?.signal,
   });
 }
 
 export function getStreamUrl(runId: string, after?: number): string {
-  const url = apiUrl(`/runs/${encodeURIComponent(runId)}/stream`);
+  const url = apiUrl(runPath(runId, "/stream"));
   if (after !== undefined && after > 0) {
     url.searchParams.set("after", after.toString());
   }

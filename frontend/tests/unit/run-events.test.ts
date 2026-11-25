@@ -503,3 +503,24 @@ test("a forced snapshot replaces state even when its cursor is older", () => {
   assert.equal(forced.cursor, 1);
   assert.equal(forced.status, "queued");
 });
+
+test("a snapshot at the same cursor keeps live details mid-run but refreshes model calls", () => {
+  const streaming = reduceRunEvent(
+    createInitialRunState({ ...QUEUED_SNAPSHOT, status: "running" }),
+    ev(2, "message.delta", { message_id: "m1", delta: "Hel" }),
+  );
+  const call = { id: "mc1", model: "m", status: "running", usage_complete: false, input_tokens: null, output_tokens: null, cached_tokens: null };
+  const same = reduceRunState(streaming, {
+    type: "snapshot",
+    snapshot: { ...QUEUED_SNAPSHOT, status: "running", snapshot_cursor: 2, events: [...QUEUED_SNAPSHOT.events, ev(2, "message.delta", {})], model_calls: [call] },
+  });
+  assert.equal(same.messages[1].status, "streaming");
+  assert.deepEqual(same.model_calls, [call]);
+});
+
+test("a finished run takes the final snapshot even at the same cursor", () => {
+  const { events, final } = draftScenario();
+  const live = replay(QUEUED_SNAPSHOT, events);
+  const withCalls = reduceRunState(live, { type: "snapshot", snapshot: { ...final, active_elapsed_ms: 1234 } });
+  assert.equal(withCalls.active_elapsed_ms, 1234);
+});

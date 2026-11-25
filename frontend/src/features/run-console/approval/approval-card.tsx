@@ -15,7 +15,7 @@ interface ApprovalCardProps {
   approval: ApprovalSnapshot;
   timeZone: string;
   /** Called after the backend accepted the decision. */
-  onDecided: () => void;
+  onDecided: (approvalId: string) => void;
   /** Called on 409: someone already decided, or the run stopped waiting. */
   onConflict: (detail: string) => void;
 }
@@ -40,6 +40,7 @@ export function ApprovalCard({ runId, approval, timeZone, onDecided, onConflict 
   const [rejecting, setRejecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false); // blocks a second click before React re-renders
+  const approveButton = useRef<HTMLButtonElement>(null);
   const rejectButton = useRef<HTMLButtonElement>(null);
   const late = lateness(proposal.promisedShipAt, proposal.shippedAt);
   const money = (minor: number | null) => (minor === null ? "—" : formatMoneyMinor(minor, proposal.currency));
@@ -51,10 +52,11 @@ export function ApprovalCard({ runId, approval, timeZone, onDecided, onConflict 
     setError(null);
     try {
       await decideApproval(runId, approval.id, decision, reason ?? null);
-      onDecided(); // the buttons stay disabled until approval.decided replaces this card
+      onDecided(approval.id); // stays busy until approval.decided replaces this card
     } catch (caught) {
       inFlight.current = false;
       setSubmitting(null);
+      (decision === "approve" ? approveButton : rejectButton).current?.focus();
       if (caught instanceof ApiError && caught.status === 409) {
         onConflict(caught.detail ?? "The approval is no longer pending.");
       } else if (caught instanceof ApiError && caught.status !== 0) {
@@ -132,7 +134,7 @@ export function ApprovalCard({ runId, approval, timeZone, onDecided, onConflict 
         </p>
         {error ? <Alert tone="danger" role="alert" title={error} /> : null}
         <div className="flex flex-wrap gap-2">
-          <Button variant="primary" onClick={() => decide("approve")} disabled={submitting !== null}>
+          <Button ref={approveButton} variant="primary" onClick={() => decide("approve")} aria-disabled={submitting !== null}>
             <Check aria-hidden />
             {submitting === "approve" ? "Approving…" : "Approve refund"}
           </Button>
@@ -140,7 +142,7 @@ export function ApprovalCard({ runId, approval, timeZone, onDecided, onConflict 
             ref={rejectButton}
             variant="danger-outline"
             onClick={() => setRejecting(true)}
-            disabled={submitting !== null}
+            aria-disabled={submitting !== null}
             aria-expanded={rejecting}
           >
             <X aria-hidden />
@@ -148,7 +150,12 @@ export function ApprovalCard({ runId, approval, timeZone, onDecided, onConflict 
           </Button>
         </div>
         {rejecting ? (
-          <RejectForm submitting={submitting === "reject"} onSubmit={(reason) => decide("reject", reason)} onCancel={cancelReject} />
+          <RejectForm
+            busy={submitting !== null}
+            rejecting={submitting === "reject"}
+            onSubmit={(reason) => decide("reject", reason)}
+            onCancel={cancelReject}
+          />
         ) : null}
       </div>
     </div>

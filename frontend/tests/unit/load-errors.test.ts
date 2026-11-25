@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ApiError, getStreamUrl } from "../../src/lib/api.ts";
+import { ApiError } from "../../src/lib/api.ts";
 import { describeLoadError, isMissingRunError } from "../../src/lib/load-errors.ts";
 import { describeAnnouncement } from "../../src/lib/activity.ts";
 import { createInitialRunState, reduceRunEvent } from "../../src/lib/run-events.ts";
@@ -20,10 +20,6 @@ test("an outage is described without leaking internals", () => {
   assert.equal(describeLoadError(new Error("ECONNREFUSED 10.0.0.3:8000")), "The backend could not be reached.");
 });
 
-test("run ids are encoded, so a crafted id cannot leave /runs/", () => {
-  assert.match(getStreamUrl("../health/ready"), /\/runs\/\.\.%2Fhealth%2Fready\/stream$/);
-});
-
 test("screen readers hear about approvals and finished runs only", () => {
   const { events } = approvalScenario();
   const paused = events.filter((e) => e.sequence <= 17).reduce(reduceRunEvent, createInitialRunState(QUEUED_SNAPSHOT));
@@ -31,4 +27,6 @@ test("screen readers hear about approvals and finished runs only", () => {
   assert.equal(describeAnnouncement(createInitialRunState(QUEUED_SNAPSHOT)), "");
   assert.equal(describeAnnouncement(paused), "Approval needed: $84.51 USD refund for ORD-1006.");
   assert.equal(describeAnnouncement(finished), "Completed in 4 turns and 3 tool calls.");
+  const decided = events.filter((e) => e.sequence <= 19).reduce(reduceRunEvent, createInitialRunState(QUEUED_SNAPSHOT));
+  assert.equal(describeAnnouncement(decided), "Your decision is recorded. Resuming the run…");
 });

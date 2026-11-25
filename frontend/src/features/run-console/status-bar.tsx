@@ -34,7 +34,8 @@ interface StatusBarProps {
 export function StatusBar({ state, activity, connection, onStopped, actions }: StatusBarProps) {
   const approval = state.pending_approval;
   return (
-    <div className="sticky top-14 z-30 -mx-4 border-y border-border bg-bg px-4 py-2.5 sm:-mx-6 sm:px-6">
+    // Sticky from md up; on small screens it would cover too much of the page.
+    <div className="z-30 -mx-4 border-y border-border bg-bg px-4 py-2.5 sm:-mx-6 sm:px-6 md:sticky md:top-14">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <StatusPill meta={runStatusMeta(state.status)} />
         <ConnectionBadge connection={connection} />

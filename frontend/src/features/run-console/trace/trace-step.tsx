@@ -19,22 +19,22 @@ interface TraceStepProps extends StepPosition {
   title: ReactNode;
   meta?: ReactNode;
   spinning?: boolean;
-  /** Lets a "jump to" button move keyboard focus to this step's title. */
-  focusableTitle?: boolean;
   children?: ReactNode;
 }
 
 /** One node of the vertical trace: a status-colored marker, a connector line and content. */
 export function TraceStep(props: TraceStepProps) {
-  const { id, icon: Icon, tone, title, meta, spinning, focusableTitle, children, position, total, isLast } = props;
+  const { id, icon: Icon, tone, title, meta, spinning, children, position, total, isLast } = props;
   const titleId = `${id}-title`;
   return (
+    // tabIndex -1: not in the tab order, but focusable, so actions can move focus to their result.
     <article
       id={id}
+      tabIndex={-1}
       aria-labelledby={titleId}
       aria-posinset={position}
       aria-setsize={total}
-      className="relative scroll-mt-32 pb-7 pl-10 motion-safe:animate-enter"
+      className="relative rounded-md pb-7 pl-10 motion-safe:animate-enter"
     >
       {isLast ? null : <span aria-hidden className="absolute top-8 bottom-0 left-[13px] w-px bg-border" />}
       <span
@@ -44,7 +44,7 @@ export function TraceStep(props: TraceStepProps) {
         <Icon className={cx("size-3.5", spinning && "motion-safe:animate-spin")} />
       </span>
       <header className="flex min-h-7 flex-wrap items-center gap-x-2 gap-y-0.5">
-        <h3 id={titleId} tabIndex={focusableTitle ? -1 : undefined} className="text-sm font-semibold text-fg outline-none">
+        <h3 id={titleId} className="text-sm font-semibold text-fg">
           {title}
         </h3>
         {meta ? <span className="text-xs text-muted">{meta}</span> : null}

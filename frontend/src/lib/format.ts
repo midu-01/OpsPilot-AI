@@ -29,6 +29,7 @@ export function plural(count: number, singular: string, pluralForm = `${singular
 
 /** Money arrives as integer minor units (cents). 8451 USD -> "$84.51". */
 export function formatMoneyMinor(amountMinor: number, currency = "USD"): string {
+  if (!Number.isFinite(amountMinor)) return "—";
   let formatter: Intl.NumberFormat;
   try {
     formatter = new Intl.NumberFormat(LOCALE, { style: "currency", currency });
@@ -62,7 +63,7 @@ export function formatCostUsd(value: string | null | undefined): string {
 /** 850 -> "850ms", 4230 -> "4.2s", 65_000 -> "1m 05s", 7_380_000 -> "2h 03m". */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 0) return "—";
-  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 1000) return `${Math.floor(ms)}ms`;
   if (ms < 60_000) return `${(Math.floor(ms / 100) / 10).toFixed(1)}s`;
   const totalSeconds = Math.floor(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
@@ -83,10 +84,19 @@ function toDate(iso: string): Date | null {
   return Number.isNaN(time) ? null : new Date(time);
 }
 
+/**
+ * "2026-02-01" is a calendar day, not an instant: Date.parse reads it as UTC midnight,
+ * so it must also be formatted in UTC or it shifts a day in zones behind UTC.
+ */
+function zoneFor(iso: string, timeZone: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(iso) ? "UTC" : timeZone;
+}
+
 /** "Feb 15, 2026". Date-only strings ("2026-02-15") are read as that calendar day. */
 export function formatDate(iso: string, timeZone = "UTC"): string {
   const date = toDate(iso);
-  return date ? dateTimeFormat(timeZone, { month: "short", day: "numeric", year: "numeric" }).format(date) : iso;
+  if (!date) return iso;
+  return dateTimeFormat(zoneFor(iso, timeZone), { month: "short", day: "numeric", year: "numeric" }).format(date);
 }
 
 /** "Feb 15, 2026, 14:05 UTC" (24-hour clock, explicit zone). */
@@ -116,10 +126,13 @@ export function formatDateRange(startIso: string, endIso: string, timeZone = "UT
   const start = toDate(startIso);
   const end = toDate(endIso);
   if (!start || !end) return `${startIso} – ${endIso}`;
-  const year = (date: Date) => dateTimeFormat(timeZone, { year: "numeric" }).format(date);
-  if (year(start) !== year(end)) return `${formatDate(startIso, timeZone)} – ${formatDate(endIso, timeZone)}`;
-  const monthDay = dateTimeFormat(timeZone, { month: "short", day: "numeric" });
-  return `${monthDay.format(start)} – ${monthDay.format(end)}, ${year(end)}`;
+  const startZone = zoneFor(startIso, timeZone);
+  const endZone = zoneFor(endIso, timeZone);
+  const startYear = dateTimeFormat(startZone, { year: "numeric" }).format(start);
+  const endYear = dateTimeFormat(endZone, { year: "numeric" }).format(end);
+  if (startYear !== endYear) return `${formatDate(startIso, timeZone)} – ${formatDate(endIso, timeZone)}`;
+  const monthDay = (date: Date, zone: string) => dateTimeFormat(zone, { month: "short", day: "numeric" }).format(date);
+  return `${monthDay(start, startZone)} – ${monthDay(end, endZone)}, ${endYear}`;
 }
 
 /** "just now", "5m ago", "3h ago", "2d ago", then the date. `nowMs` is passed in to keep this pure. */

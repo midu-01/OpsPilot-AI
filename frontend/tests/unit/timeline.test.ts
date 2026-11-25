@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createInitialRunState, reduceRunEvent, type RunState } from "../../src/lib/run-events.ts";
-import { buildTimeline, isTraceStreaming, type TimelineItem } from "../../src/lib/timeline.ts";
+import { buildTimeline, isTextStreaming, type TimelineItem } from "../../src/lib/timeline.ts";
 import type { RunEvent, RunSnapshot } from "../../src/lib/api.ts";
 import { approvalScenario, draftScenario, ev, QUEUED_SNAPSHOT } from "./fixtures/scenarios.ts";
 
@@ -68,7 +68,7 @@ test("a pending approval appears right after its turn while the run waits", () =
   const { events } = approvalScenario();
   const paused = replay(QUEUED_SNAPSHOT, events.filter((e) => e.sequence <= 17));
   assert.deepEqual(shape(buildTimeline(paused)).slice(-2), ["turn-3:call-refund", "approval:app-1:pending"]);
-  assert.equal(isTraceStreaming(paused), false);
+  assert.equal(isTextStreaming(paused), false);
 });
 
 test("text is an answer only when the run completed; otherwise it stays a turn", () => {
@@ -77,7 +77,7 @@ test("text is an answer only when the run completed; otherwise it stays a turn",
   const failed = reduceRunEvent(streaming, ev(19, "run.failed", { code: "MODEL_ERROR", message: "Boom" }));
 
   assert.deepEqual(shape(buildTimeline(streaming)).slice(-1), ["turn-4:"]);
-  assert.equal(isTraceStreaming(streaming), true);
+  assert.equal(isTextStreaming(streaming), true);
   assert.deepEqual(shape(buildTimeline(failed)).slice(-2), ["turn-4:", "outcome:failed"]);
 });
 
@@ -85,4 +85,17 @@ test("the goal message and tool observations never become turns", () => {
   const { final } = draftScenario();
   const items = buildTimeline(createInitialRunState(final));
   assert.equal(items.filter((item) => item.kind === "turn" || item.kind === "answer").length, 4);
+});
+
+test("calls requested while a turn's text streams stay in that turn, with the same key afterwards", () => {
+  const start = [
+    ev(2, "run.started", {}),
+    ev(3, "message.delta", { message_id: "m1", delta: "Checking the orders." }),
+    ev(4, "tool.requested", { tool_call_id: "c1", provider_call_id: "p1", name: "query_orders", arguments: {} }),
+  ];
+  const during = replay(QUEUED_SNAPSHOT, start);
+  const after = replay(QUEUED_SNAPSHOT, [...start, ev(5, "message.completed", { message_id: "m1", text: "Checking the orders." })]);
+
+  assert.deepEqual(shape(buildTimeline(during)), ["goal", "turn-1:c1"]);
+  assert.deepEqual(shape(buildTimeline(after)), ["goal", "turn-1:c1"]);
 });
