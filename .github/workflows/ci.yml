@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "phase-*"]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -13,10 +13,11 @@ jobs:
   backend:
     name: Backend Lint, Types & Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       postgres:
-        image: postgres:17-bookworm
+        # The same image as compose.yaml: migrations create the pgvector extension.
+        image: pgvector/pgvector:0.8.7-pg17-bookworm
         env:
           POSTGRES_USER: opspilot
           POSTGRES_PASSWORD: opspilot_test
@@ -126,7 +127,7 @@ jobs:
   compose-e2e:
     name: Isolated Docker Compose E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -154,7 +155,7 @@ jobs:
       - name: Start isolated Compose stack
         run: |
           P8_PROJECT="opspilot-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          echo "P8_PROJECT=${P8_PROJECT}" >> $GITHUB_ENV
+          echo "P8_PROJECT=${P8_PROJECT}" >> "$GITHUB_ENV"
           docker compose --env-file .env.example -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml config --quiet
           docker compose --env-file .env.example -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml up --build --wait --wait-timeout 180 -d
           curl -fsS http://127.0.0.1:18000/health/ready
@@ -167,8 +168,9 @@ jobs:
         working-directory: frontend
         env:
           E2E_EXTERNAL_STACK: "1"
-        run: |
-          pnpm exec playwright test tests/approval-flow.spec.ts tests/draft-only.spec.ts --workers=1 --retries=0
+        # The whole suite, as in the README. The setup project signs in the demo users first;
+        # playwright.config.ts already runs one worker with no retries.
+        run: pnpm exec playwright test
 
       - name: Teardown isolated Compose stack
         if: always()
