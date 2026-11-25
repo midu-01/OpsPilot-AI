@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activeElapsedMs, budgetItems } from "../../src/lib/run-metrics.ts";
+import { activeElapsedMs, budgetItems, toolCallDurationMs } from "../../src/lib/run-metrics.ts";
 import { createInitialRunState } from "../../src/lib/run-events.ts";
 import { QUEUED_SNAPSHOT } from "./fixtures/scenarios.ts";
 
@@ -43,4 +43,10 @@ test("an unknown cost shows a dash and explains why", () => {
   assert.equal(cost?.value, "—");
   assert.match(cost?.hint ?? "", /no configured price/);
   assert.equal(items.find((item) => item.key === "tokens")?.flag, null);
+});
+
+test("a tool call's duration comes from its server timestamps", () => {
+  assert.equal(toolCallDurationMs({ started_at: "2026-02-15T12:00:00Z", completed_at: "2026-02-15T12:00:01.250Z" }), 1250);
+  assert.equal(toolCallDurationMs({ started_at: "2026-02-15T12:00:00Z", completed_at: null }), null);
+  assert.equal(toolCallDurationMs({ started_at: "bad", completed_at: "2026-02-15T12:00:00Z" }), null);
 });
