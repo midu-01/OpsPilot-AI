@@ -71,6 +71,8 @@ test("SSE frames pass through incrementally with replay cursors", async (t) => {
   assert.equal(sentCursor, "11");
   assert.match(response.headers.get("content-type")!, /text\/event-stream/);
   assert.equal(response.headers.get("x-accel-buffering"), "no");
+  // The proxy opens with an SSE comment so headers reach the browser before the first event.
+  assert.equal(new TextDecoder().decode((await reader.read()).value), ": connected\n\n");
   assert.match(new TextDecoder().decode((await reader.read()).value), /id: 12\nevent: message.delta/);
 
   controller!.enqueue(encoder.encode('id: 13\nevent: run.completed\ndata: {"sequence":13}\n\n'));
@@ -113,4 +115,24 @@ test("the proxy does not forward arbitrary or traversal paths", async (t) => {
     const response = await forwardApiRequest(new Request("http://frontend:3000/api/unknown"), path);
     assert.equal(response.status, 404);
   }
+});
+
+test("a stream response that is not 200 is passed through untouched", async (t) => {
+  internalApi(t);
+  t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 204 }));
+  const response = await forwardApiRequest(new Request(`http://frontend:3000/api/runs/${RUN_ID}/stream?after=9`), ["runs", RUN_ID, "stream"]);
+  assert.equal(response.status, 204);
+  assert.equal(await response.text(), "");
+});
+
+test("closing the browser stream cancels the backend stream", async (t) => {
+  internalApi(t);
+  let cancelled = false;
+  const upstream = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+  t.mock.method(globalThis, "fetch", async () => new Response(upstream, { headers: { "content-type": "text/event-stream" } }));
+  const response = await forwardApiRequest(new Request(`http://frontend:3000/api/runs/${RUN_ID}/stream`), ["runs", RUN_ID, "stream"]);
+  const reader = response.body!.getReader();
+  await reader.read(); // the opening comment
+  await reader.cancel();
+  assert.equal(cancelled, true);
 });
