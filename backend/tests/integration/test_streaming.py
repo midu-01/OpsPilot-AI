@@ -128,17 +128,17 @@ async def test_streaming_early_event_before_finish_and_reconnect(sessions: Sessi
             received_lines: list[str] = []
             early_event_received = False
 
+            # The server closes the stream after the terminal frame, so this loop ends on its own.
             async for line in response.aiter_lines():
                 received_lines.append(line)
-                if line.startswith("data: ") and "Early incremental progress" in line:
+                # Only the first match is the live delta: message.completed repeats the same text later.
+                if not early_event_received and line.startswith("data: ") and "Early incremental progress" in line:
                     early_event_received = True
                     # Provider MUST still be blocked!
                     assert not pause_event.is_set()
                     assert first_emitted.is_set()
                     # Now unblock provider to let it finish
                     pause_event.set()
-                if "run.completed" in line:
-                    break
 
             assert early_event_received
             events = parse_sse_events(received_lines)
@@ -214,12 +214,8 @@ async def test_two_subscribers_and_disconnect_no_duplicate_execution(sessions: S
         pause_event.set()
         await asyncio.wait_for(worker_task, timeout=2.0)
 
-        # Subscriber 2 should still receive terminal event
-        sub2_lines: list[str] = []
-        async for line in resp2.aiter_lines():
-            sub2_lines.append(line)
-            if "run.completed" in line:
-                break
+        # Subscriber 2 should still receive terminal event; the server closes the stream after it
+        sub2_lines = [line async for line in resp2.aiter_lines()]
         await sub2_stream.__aexit__(None, None, None)
 
         events2 = parse_sse_events(sub2_lines)
@@ -262,12 +258,8 @@ async def test_stop_and_approval_are_independent_commands(sessions: Sessions, se
             stop_resp = await client.post(f"/runs/{run_id}/stop")
             assert stop_resp.status_code == 200
 
-            # Stream receives run_cancelled terminal event
-            lines: list[str] = []
-            async for line in stream.aiter_lines():
-                lines.append(line)
-                if "run.cancelled" in line:
-                    break
+            # Stream receives run_cancelled terminal event; the server closes the stream after it
+            lines = [line async for line in stream.aiter_lines()]
 
             events = parse_sse_events(lines)
             assert any(e.type == EventType.run_cancelled for e in events)
