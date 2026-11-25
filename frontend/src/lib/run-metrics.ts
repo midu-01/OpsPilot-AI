@@ -1,5 +1,13 @@
+import type { ToolCallSnapshot } from "./api.ts";
 import { formatCostUsd, formatCount, formatDuration } from "./format.ts";
 import type { RunState } from "./run-events.ts";
+
+/** How long a finished tool call took, from its server timestamps. */
+export function toolCallDurationMs(call: Pick<ToolCallSnapshot, "started_at" | "completed_at">): number | null {
+  if (!call.started_at || !call.completed_at) return null;
+  const ms = Date.parse(call.completed_at) - Date.parse(call.started_at);
+  return Number.isNaN(ms) ? null : Math.max(0, ms);
+}
 
 /**
  * Active time as of `nowMs`. The server only reports it in snapshots, so while the
