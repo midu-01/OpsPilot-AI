@@ -1,40 +1,28 @@
-import Link from "next/link";
-import { getRun } from "../../../lib/api";
-import RunConsole from "../../../components/run-console";
-
-export const dynamic = "force-dynamic";
+import type { Metadata } from "next";
+import { notFound } from "next/navigation";
+import { truncate } from "@/lib/format";
+import { BackendUnavailable } from "@/components/states/backend-unavailable";
+import { RunConsole } from "@/features/run-console/run-console";
+import { loadRun } from "@/server/data";
 
 interface RunPageProps {
   params: Promise<{ id: string }>;
 }
 
-export default async function RunDetailPage({ params }: RunPageProps) {
-  const { id } = await params;
+export async function generateMetadata({ params }: RunPageProps): Promise<Metadata> {
+  const result = await loadRun((await params).id);
+  return { title: result.kind === "ok" ? truncate(result.snapshot.goal, 60) : "Run" };
+}
 
-  let snapshot = null;
-  let errorMessage: string | null = null;
-
-  try {
-    snapshot = await getRun(id);
-  } catch (err: unknown) {
-    errorMessage = err instanceof Error ? err.message : "Run not found";
+/**
+ * Server Component: fetches the run snapshot (GET /runs/{id}) and hands it to the
+ * client console, which streams everything after the snapshot's cursor.
+ */
+export default async function RunPage({ params }: RunPageProps) {
+  const result = await loadRun((await params).id);
+  if (result.kind === "not-found") notFound();
+  if (result.kind === "unavailable") {
+    return <BackendUnavailable title="This run can't be loaded right now" message={result.message} />;
   }
-
-  if (!snapshot) {
-    return (
-      <div className="card" role="alert">
-        <h1 className="page-title" style={{ fontSize: "1.5rem", color: "var(--color-danger)" }}>
-          Run Not Found
-        </h1>
-        <p className="page-subtitle" style={{ marginBottom: "20px" }}>
-          Could not load run with ID <code>{id}</code>. ({errorMessage})
-        </p>
-        <Link href="/runs" className="btn btn-secondary">
-          ← View All Runs
-        </Link>
-      </div>
-    );
-  }
-
-  return <RunConsole initialSnapshot={snapshot} />;
+  return <RunConsole key={result.snapshot.id} initialSnapshot={result.snapshot} />;
 }

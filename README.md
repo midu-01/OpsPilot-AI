@@ -4,17 +4,18 @@ OpsPilot AI is an operations copilot built with **Next.js 16 (App Router)** and 
 
 ---
 
-## Architectural Overview
+## Architecture Diagram & System Overview
 
 ```mermaid
 flowchart TD
   subgraph Frontend["Next.js 16 Console (App Router and TypeScript)"]
-    Composer["Goal Composer (/)"]
-    Console["Live Run Console (/runs/:id)"]
-    ApprovalUI["Human Approval Card"]
-    History["Runs History (/runs)"]
-    Reducer["Sequence-Aware Event Reducer"]
-    StreamReader["SSE ReadableStream Reader"]
+    Composer["New run page / (Server) + composer (Client)"]
+    History["Runs page /runs (Server) + auto-refresh (Client)"]
+    RunPage["Run page /runs/:id (Server: loads the snapshot)"]
+    Console["RunConsole (Client island): trace, tool views, inspector"]
+    ApprovalUI["Approval card"]
+    Reducer["Pure reducer + view models (timeline, now line, budget)"]
+    StreamReader["useRunStream + stream loop (cursor, gaps, back-off)"]
     ApiProxy["Same-origin /api proxy"]
   end
 
@@ -83,57 +84,95 @@ flowchart TD
   Broker -.->|Post-commit wake-up hint| SSEEndpoint
   SSEEndpoint -->|id, event, data frames| ApiProxy
   ApiProxy -->|Unbuffered SSE frames| StreamReader
-  StreamReader -->|Deduplicate by sequence| Reducer
+  RunPage -->|GET /runs/:id snapshot| HTTPRoutes
+  RunPage -->|Initial snapshot| Console
+  History -->|GET /runs?page=N| HTTPRoutes
+  StreamReader -->|Contiguous events only| Reducer
   Reducer --> Console
-  Reducer --> ApprovalUI
-  Reducer --> History
+  Console --> ApprovalUI
 ```
 
 ---
 
-## Quick Start (One-Command Startup)
+## Setup Instructions
 
-With Docker Engine and Docker Compose installed:
+### Prerequisites
+- **Containerized Run (Recommended):** [Docker Desktop](https://www.docker.com/products/docker-desktop/) or Docker Engine with Docker Compose v2.
+- **Native Local Development (Optional):** Python 3.12+, Node.js 20+, [pnpm](https://pnpm.io/) 10+, [uv](https://docs.astral.sh/uv/) package manager, and a local PostgreSQL 17 instance.
 
-```sh
-# 1. Start all services (Database, Backend API, Frontend Console)
-docker compose up --build -d
+---
 
-# 2. Verify service health
-docker compose ps
-```
+### Option A: Quick Start with Docker Compose (Recommended)
 
-### Browser API connection
+1. **Clone and configure environment:**
+   ```sh
+   cp .env.example .env
+   ```
+   *(By default, `LLM_PROVIDER=fake` runs offline deterministic multi-turn scenarios without needing any external API keys).*
+
+2. **Launch all containers in detached mode:**
+   ```sh
+   docker compose up --build -d
+   ```
+
+3. **Verify running containers and health:**
+   ```sh
+   docker compose ps
+   ```
+
+4. **Follow startup logs:**
+   ```sh
+   docker compose logs -f backend
+   ```
+
+5. **Stop containers (preserving database volume):**
+   ```sh
+   docker compose down
+   ```
+
+---
+
+### Option B: Native Local Development Setup
+
+If running without Docker:
+
+1. **Start PostgreSQL 17:**
+   Ensure a local PostgreSQL instance is running on port 5432 with a database named `opspilot`.
+
+2. **Set up the Backend (FastAPI):**
+   ```sh
+   cd backend
+   uv sync
+   uv run alembic upgrade head
+   uv run python -m app.seed
+   uv run uvicorn app.main:app --reload --port 8000
+   ```
+
+3. **Set up the Frontend (Next.js):**
+   ```sh
+   cd frontend
+   pnpm install
+   pnpm dev
+   ```
+
+---
+
+### Browser API Connection & Proxy Routing
 
 The browser sends commands, readiness checks, and SSE subscriptions to `/api` on the **same origin as the console**. Next.js forwards them to `API_INTERNAL_URL` (`http://backend:8000` in Compose; `http://127.0.0.1:8000` for native development). No browser-side port mapping or CORS permission is needed for the default console path, including the isolated test ports. SSE bodies are forwarded without buffering, with the replay cursor intact.
 
 `NEXT_PUBLIC_API_BASE_URL` is an optional **build-time** override for deployments intentionally using a separate browser API. Such deployments must configure CORS and browser network permissions themselves; do not set this override for the normal Compose setup.
 
 After pulling a frontend or backend fix, rebuild the running services from the repository root:
-
 ```sh
 docker compose up -d --build --wait backend frontend
 ```
-
-This preserves the database volume. Reload the browser after the rebuild; the running container does not automatically pick up source edits.
-
-If submission shows a connection error, check `/api/health/ready` on the console's origin and inspect `docker compose logs --tail=50 frontend backend`. HTTP 502 means Next.js cannot reach `API_INTERNAL_URL`; HTTP 422 means input validation failed. `PROVIDER_CONFIGURATION_ERROR` **after a run ID is returned** is a separate provider setup problem: check that the selected provider's server-side key is set in the ignored `.env`, then recreate the backend. Do not share keys or raw environment output.
 
 ### Access Points
 - **Next.js Console:** [http://localhost:3000](http://localhost:3000) (or [http://127.0.0.1:3000](http://127.0.0.1:3000))
 - **FastAPI Interactive Docs (Swagger):** [http://localhost:8000/docs](http://localhost:8000/docs)
 - **Backend Readiness Probe:** [http://localhost:8000/health/ready](http://localhost:8000/health/ready)
 - **Backend Liveness Probe:** [http://localhost:8000/health/live](http://localhost:8000/health/live)
-
-To view backend startup logs:
-```sh
-docker compose logs backend | grep -E "Demo reference date|Example goal"
-```
-
-To stop the services while preserving the database volume:
-```sh
-docker compose down
-```
 
 ---
 
@@ -185,51 +224,76 @@ The agent loop dispatches four strictly typed tools:
 ## Core Scenarios to Run
 
 ### Scenario 1: Read-Only Analysis & Email Drafts (No Write Action)
-Paste this goal into the console (`/`):
+Choose the **Draft late-shipment emails** scenario on the New run page (`/`), or paste:
 > *"Find orders over \$500 that shipped late last month and draft a short refund email for each. Cite the applicable policy. Keep each email to two sentences."*
 
 - **What Happens:** The agent calls `date_math`, `query_orders`, and `search_policies`. It composes email drafts directly in its response.
-- **Verification:** No approval card appears. The simulated refund ledger has zero new entries.
+- **Verification:** No approval card appears. Each draft is an email card with its own copy button. The simulated refund ledger has zero new entries.
 
 ### Scenario 2: Explicit Refund with Human Approval
 Paste this goal:
 > *"Check the late-shipment policy and issue the eligible simulated refund for ORD-1006. Show the proposed amount and evidence for my approval."*
 
 - **What Happens:** The agent queries order `ORD-1006` (\$845.05) and policy v1 (10% up to \$100). It calculates \$84.51 USD (8,451 cents), pauses execution, and presents an **Approval Card**.
-- **Reload Survival:** Refresh the browser page (`F5`). The same approval card reappears with exact details.
-- **Decision:** Click **Approve Refund**. The worker claims the resumed run, records the simulated ledger entry, and outputs the final confirmation.
+- **Reload Survival:** Refresh the browser page (`F5`). The same approval card reappears with exact details, and the tab title says "Approval needed".
+- **Decision:** Click **Approve refund**. The worker claims the resumed run, records the simulated ledger entry, and outputs the final confirmation.
 
 ### Scenario 3: Rejection with Required Reason
 Paste this goal:
 > *"Please issue the eligible late-shipment refund for ORD-1001 and wait for my decision."*
 
-- **What Happens:** The agent pauses for `ORD-1001` (\$62.50). Click **Reject Proposal…** and enter a reason (*"Customer requested store credit"*).
+- **What Happens:** The agent pauses for `ORD-1001` (\$62.50). Click **Reject…** and enter a reason (*"Customer requested store credit"*). A blank reason is refused.
 - **Verification:** The rejection reason is passed back to the agent as a tool observation. The agent acknowledges it. Zero rows are added to the refund ledger.
 
 ### Scenario 4: Stopping a Run
-Click the **Stop Run** button on any in-flight or waiting run.
+Click **Stop** (then **Stop run** to confirm) on any queued, running, or waiting run.
 - **What Happens:** The run transitions through `cancelling` to `cancelled`. Partial output is preserved. Pending approvals are marked cancelled. Closing the browser tab does **not** cancel a run.
 
 ---
 
-## Key Design Decisions & Trade-Offs
+## Design Decisions
 
-| Decision | Choice | Rationale & Trade-Off |
+| Decision | Choice | Rationale |
 | :--- | :--- | :--- |
-| **Agent Orchestration** | Native Tool Loop (No heavy framework) | **Why:** Full control over step limits, token budgets, execution timeouts, and pause/resume transactions. Easier to debug and explain in live interviews than opaque framework graphs.<br>**Trade-off:** Must hand-craft continuation payload tracking and resume logic. |
-| **Browser Transport** | SSE (`ReadableStream`) + HTTP POST | **Why:** Server-Sent Events provide natural, lightweight one-way streaming for text and tool events. Reconnects via `Last-Event-ID` or `?after=N` prevent event loss. Commands (Approve, Stop) remain explicit HTTP POST requests.<br>**Trade-off:** Client must handle sequence deduplication and gap reconciliation. |
-| **State & Persistence** | PostgreSQL as Source of Truth | **Why:** Browser refresh, container restarts, and pending approvals survive without in-memory dependency. Relational foreign keys prevent orphan calls or decisions.<br>**Trade-off:** Every event and state change requires a database transaction. |
-| **Execution Ownership** | Single-Process Lifespan Worker | **Why:** Simplifies Docker Compose local deployment with zero external task broker (RabbitMQ/Redis) overhead. PostgreSQL advisory locks ensure single-worker ownership.<br>**Trade-off:** Concurrent runs execute serially in the queue rather than in parallel across multiple workers. |
-| **Simulated Ledger** | Idempotent PostgreSQL Table | **Why:** Safe, realistic demonstration of financial write actions with integer-cent precision (`amount_minor`) and idempotency constraints (`order_id`, `policy_version`).<br>**Trade-off:** Does not integrate with third-party payment APIs like Stripe. |
+| **Agent Orchestration** | Native Async Tool Loop (No heavy framework) | Built directly with Python 3.12 async generators and Pydantic v2 schemas. Avoids opaque framework abstractions (e.g. LangChain, CrewAI), providing full observability over continuation contexts, step limits, token budgets, and pause/resume transactions. |
+| **State Persistence** | PostgreSQL 17 as Single Source of Truth | Every state transition (`queued` $\to$ `running` $\to$ `awaiting_approval` $\to$ `completed`/`failed`/`cancelled`), message transcript, tool call, and monotonic event is durably committed before dispatching. Runs survive container crashes and browser reloads without in-memory dependency. |
+| **Browser Transport** | Server-Sent Events (SSE) + HTTP POST | One-way SSE stream for real-time text deltas and tool lifecycle telemetry. Reconnects via `Last-Event-ID` or `?after=N` replay committed events from the database. Explicit user actions (Approve, Reject, Stop) use standard HTTP POST requests. |
+| **Network Architecture** | Same-Origin Next.js Reverse Proxy (`/api/*`) | Direct browser-to-backend requests across ports (`:8000` vs `:3000`) encounter CORS preflight and private-network permission blocks. Next.js App Router catch-all route forwards requests server-to-server to `API_INTERNAL_URL` (`http://backend:8000`) with unbuffered streaming. |
+| **Safety Guardrail** | Human-in-the-Loop Financial Boundary | Write actions (`issue_refund`) cannot execute autonomously. When proposed, the agent loop pauses, commits a pending approval record, and yields the worker. Execution only resumes after a human operator explicitly approves or rejects the action with a mandatory reason. |
+| **Server/Client Split** | Server pages, one client island per live view | Pages and the layout are Server Components that load data next to the backend and return expected failures as values. The run console is a single client island because everything in it follows the stream; elsewhere, client code is limited to small interactive leaves (composer, theme toggle, auto-refresh). |
+| **Live Trace State** | Pure reducer + view models + React-free stream loop | The SSE loop resumes from the snapshot cursor, accepts only contiguous sequences, reloads the snapshot on a gap or disconnect, and backs off between retries. The reducer groups tool calls the same way the server does (calls requested before their turn's `message.completed` wait for it), so the live trace and the replay match. Both are unit-tested without React. |
+| **Rendering Untrusted Output** | react-markdown without raw HTML | Model text is rendered with raw HTML dropped, images disabled and links limited to http, https and mailto. There is no `dangerouslySetInnerHTML` in the app; the theme uses a cookie read on the server instead of an inline script. Email drafts become cards with copy buttons. |
+| **Design System** | Tailwind v4 tokens + small owned components | One token table (light and dark through `light-dark()`), semantic status colors always paired with an icon and a label, Radix primitives for tabs, dialog and tooltip, and no component kit. axe checks WCAG 2.2 AA in both themes. |
 
 ---
 
-## Known Gaps & Future Work
+## Technical Trade-offs
 
-1. **Distributed Worker Leasing:** The current implementation uses a single-process worker with PostgreSQL row-level locks. For high-throughput cloud deployment, worker queue leasing with heartbeats and horizontal scaling would be added.
-2. **Multi-User Authentication & RBAC:** Currently single-tenant local baseline. Adding JWT/OIDC authentication and role-based permissions (Operator vs Approver) is the natural next step.
-3. **Policy Retrieval Scaling:** Currently deterministic keyword search over 8 markdown documents. For hundreds of policy manuals, hybrid vector embedding search (pgvector) would replace keyword search.
-4. **Third-Party Integrations:** Connect simulated ledger writes to live payment providers (Stripe/Adyen) and email drafts to SendGrid/Postmark behind customer-facing confirmation.
+| Area | Approach Chosen | Trade-off & Compromise |
+| :--- | :--- | :--- |
+| **Worker Architecture** | Single-Process Lifespan Worker with PostgreSQL Locks | Eliminates external task broker dependencies (Redis, RabbitMQ, Celery), making local startup instant and reliable. However, multiple queued runs are processed sequentially rather than distributed across parallel worker nodes. |
+| **Streaming Protocol** | Server-Sent Events (SSE) instead of WebSockets | SSE is simpler, HTTP/2-friendly, cacheable, and features native browser reconnection. However, it is unidirectional; commands require separate HTTP POST requests instead of duplex messaging over a single socket. |
+| **Currency Arithmetic** | Integer Cents (`amount_minor`) instead of Float | All calculations ($R_{\text{cents}} = \min(\lfloor A_{\text{cents}} \times 0.10 + 0.5 \rfloor, 10000)$) use integer cents and `ROUND_HALF_UP`. Eliminates IEEE-754 floating-point precision bugs; requires explicit division by 100 when rendering formatted currency to users. |
+| **Policy Search Engine** | In-Memory BM25 Keyword Search instead of Vector Database | Zero embedding API latency, zero external vector database overhead, and deterministic citations across the 8 bundled markdown policies. However, it does not support semantic paraphrase matching for thousands of unstructured documents. |
+| **Time Management** | Pinned Reference Date (`2026-02-15` UTC) for Demo Seed | Guarantees 100% reproducible test assertions and offline scenario reliability regardless of when tests run. In production mode, reference time defaults to real-time `datetime.now(timezone.utc)`. |
+
+---
+
+## Known Gaps
+
+1. **Horizontal Worker Auto-Scaling:** The worker currently uses an in-process queue loop with PostgreSQL advisory locks. Scaling across multiple container replicas requires distributed queue leasing with worker heartbeat health checks.
+2. **Multi-User Authentication & RBAC:** Currently operates as a single-tenant operations console. Multi-user enterprise deployment requires JWT/OIDC authentication with role separation (e.g., Tier-1 Support Operator vs. Finance Manager).
+3. **Outbound Channel Connectors:** While the system drafts emails and commits simulated ledger entries, outbound email delivery (via SendGrid/AWS SES) and real banking/Stripe transfers are not wired to live external APIs.
+4. **Vector Search for Large Policy Corpora:** Policy retrieval uses BM25 keyword matching suitable for small policy collections; larger corpora require hybrid pgvector indexing.
+
+---
+
+## Future Improvements
+
+1. **Webhook & Collaboration Integrations:** Real-time Slack/Microsoft Teams notifications with interactive approval buttons when runs enter `awaiting_approval`.
+2. **Multi-Agent Separation of Concerns:** Decoupling research (investigating orders/policies) from calculation auditing (verifying mathematical proofs) into two specialized collaborating subagents.
+3. **Live Payment Gateway Sandboxes:** Connect the simulated ledger to real developer sandboxes (Stripe Test Mode, Adyen Test Platform) for end-to-end payment settlement.
+4. **Automated Continuous Benchmarking:** CI suite running golden operational datasets to detect precision/recall regressions across LLM prompt and model version bumps.
 
 ---
 
@@ -257,7 +321,8 @@ cd frontend
 pnpm install --frozen-lockfile
 pnpm lint
 pnpm typecheck
-pnpm test
+pnpm test             # unit tests for src/lib (node --test)
+pnpm test:coverage    # the same, with coverage of src/lib
 pnpm build
 ```
 
@@ -268,12 +333,14 @@ export P8_PROJECT="opspilot-p8-test"
 docker compose --env-file .env.example -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml up --build --wait -d
 curl -fsS http://127.0.0.1:18000/health/ready
 curl -fsS -o /dev/null http://127.0.0.1:13000/
-(cd frontend && E2E_EXTERNAL_STACK=1 pnpm exec playwright test tests/approval-flow.spec.ts tests/draft-only.spec.ts)
+(cd frontend && pnpm exec playwright install chromium && E2E_EXTERNAL_STACK=1 pnpm exec playwright test)
 docker compose -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml down -v --remove-orphans
 ```
+The suite covers the draft, approval, rejection and stop journeys, route states, and axe accessibility checks in both themes. It expects a fresh stack: approving `ORD-1006` writes to the simulated ledger once.
 
 ---
 
 ## Reviewer Guides
 - **Architecture & Trace Details:** [`docs/architecture.md`](docs/architecture.md)
 - **Demo Script & Interview Rehearsal:** [`docs/demo-script.md`](docs/demo-script.md)
+- **Frontend Data Flow, Boundaries & Extension Points:** [`docs/frontend.md`](docs/frontend.md)

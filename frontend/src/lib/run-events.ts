@@ -2,12 +2,38 @@ import type {
   ApprovalSnapshot,
   ApprovalStatus,
   MessageSnapshot,
+  ModelAttemptSnapshot,
   RunEvent,
   RunSnapshot,
   RunStatus,
   ToolCallSnapshot,
   ToolResult,
-} from "./api";
+} from "./api.ts";
+import { asBoolean, asNumber, asString, isRecord } from "./json.ts";
+
+/**
+ * Client-side state of one run.
+ *
+ * It starts from a server snapshot (GET /runs/{id}) and is then updated by each
+ * streamed event. Everything here is pure: the same inputs always produce the same
+ * state. Updates replace only the objects that changed, so a text delta creates a
+ * new object for one message and every other message keeps its identity (memoized
+ * components skip re-rendering).
+ */
+
+export type MessageStatus = "streaming" | "completed" | "failed";
+
+export interface RunMessage {
+  id: string;
+  index: number;
+  role: MessageSnapshot["role"];
+  text: string | null;
+  /** Snapshots carry no message status, so replayed messages count as completed. */
+  status: MessageStatus;
+  /** Calls this turn requested, in request order. Their details live in RunState.tool_calls. */
+  tool_call_ids: string[];
+  created_at: string;
+}
 
 export interface RunState {
   id: string;
@@ -17,41 +43,54 @@ export interface RunState {
   model: string;
   reference_time: string;
   business_timezone: string;
+  created_at: string;
+  updated_at: string;
   step_count: number;
   tool_call_count: number;
-  total_tokens: number;
-  token_usage_complete?: boolean | null;
-  cost_is_upper_bound?: boolean;
-  estimated_cost_usd?: string | null;
-  active_elapsed_ms: number;
   max_agent_steps: number;
   max_tool_calls: number;
-  messages: MessageSnapshot[];
+  total_tokens: number;
+  token_usage_complete: boolean | null;
+  cost_is_upper_bound: boolean;
+  estimated_cost_usd: string | null;
+  /** Active time accumulated up to `active_since` (or in total, when not running). */
+  active_elapsed_ms: number;
+  /** Server time the current running interval started; null while not running. */
+  active_since: string | null;
+  model_calls: ModelAttemptSnapshot[];
+  messages: RunMessage[];
+  /** Every tool call of the run, in request order. */
   tool_calls: ToolCallSnapshot[];
+  /**
+   * Calls requested in the current model turn. `tool.requested` arrives before the
+   * turn's `message.completed` and has no message_id, so calls wait here and are
+   * attached to the message that completes next (the server groups them the same way).
+   */
+  pending_tool_call_ids: string[];
   approvals: ApprovalSnapshot[];
   pending_approval: ApprovalSnapshot | null;
+  /** The public event log, in sequence order. */
+  events: RunEvent[];
+  /** Sequence of the last event applied. The stream resumes after it. */
   cursor: number;
-  seen_sequences: number[];
   has_sequence_gap: boolean;
-  error?: string | null;
+  error: string | null;
+  error_code: string | null;
 }
 
+export type RunAction =
+  | { type: "event"; event: RunEvent }
+  /** `force` replaces state even with an older cursor (the server reported ours is ahead of it). */
+  | { type: "snapshot"; snapshot: RunSnapshot; force?: boolean }
+  /** POST /stop succeeded. No event announces `cancelling`, so it is applied locally. */
+  | { type: "stop-accepted" };
+
+const RUNNING_STATUSES: ReadonlySet<RunStatus> = new Set(["running", "cancelling"]);
+const FINISHED_STATUSES: ReadonlySet<RunStatus> = new Set(["completed", "failed", "cancelled"]);
+const APPROVAL_STATUSES: ReadonlySet<string> = new Set(["pending", "approved", "rejected", "cancelled"]);
+
 export function createInitialRunState(snapshot: RunSnapshot): RunState {
-  const allToolCalls: ToolCallSnapshot[] = [];
-  const seenCallIds = new Set<string>();
-  const messages = structuredClone(snapshot.messages);
-
-  for (const message of messages) {
-    for (const call of message.tool_calls) {
-      if (!seenCallIds.has(call.id)) {
-        seenCallIds.add(call.id);
-        allToolCalls.push(call);
-      }
-    }
-  }
-
-  const seenSequences = snapshot.events.map((e) => e.sequence);
-
+  const failure = snapshot.events.findLast((event) => event.type === "run.failed");
   return {
     id: snapshot.id,
     goal: snapshot.goal,
@@ -60,271 +99,300 @@ export function createInitialRunState(snapshot: RunSnapshot): RunState {
     model: snapshot.model,
     reference_time: snapshot.reference_time,
     business_timezone: snapshot.business_timezone,
+    created_at: snapshot.created_at,
+    updated_at: snapshot.updated_at,
     step_count: snapshot.step_count,
     tool_call_count: snapshot.tool_call_count,
-    total_tokens: snapshot.total_tokens,
-    token_usage_complete: snapshot.token_usage_complete,
-    cost_is_upper_bound: snapshot.cost_is_upper_bound,
-    estimated_cost_usd: snapshot.estimated_cost_usd,
-    active_elapsed_ms: snapshot.active_elapsed_ms,
     max_agent_steps: snapshot.max_agent_steps,
     max_tool_calls: snapshot.max_tool_calls,
-    messages,
-    tool_calls: allToolCalls,
-    approvals: structuredClone(snapshot.approvals),
-    pending_approval: snapshot.pending_approval ? structuredClone(snapshot.pending_approval) : null,
+    total_tokens: snapshot.total_tokens,
+    token_usage_complete: snapshot.token_usage_complete ?? null,
+    cost_is_upper_bound: snapshot.cost_is_upper_bound ?? false,
+    estimated_cost_usd: snapshot.estimated_cost_usd ?? null,
+    active_elapsed_ms: snapshot.active_elapsed_ms,
+    // The server checkpoints active time whenever it updates the run row.
+    active_since: RUNNING_STATUSES.has(snapshot.status) ? snapshot.updated_at : null,
+    model_calls: snapshot.model_calls,
+    messages: snapshot.messages.map(toRunMessage),
+    tool_calls: snapshot.messages.flatMap((message) => message.tool_calls),
+    pending_tool_call_ids: [],
+    approvals: snapshot.approvals,
+    pending_approval: snapshot.pending_approval ?? null,
+    events: snapshot.events,
     cursor: snapshot.snapshot_cursor,
-    seen_sequences: seenSequences,
     has_sequence_gap: false,
-    error: snapshot.events.findLast(event => event.type === "run.failed")?.payload.message as string | undefined,
+    error: asString(failure?.payload.message),
+    error_code: asString(failure?.payload.code),
   };
 }
 
-export type RunAction = RunEvent | { snapshot: RunSnapshot };
+function toRunMessage(message: MessageSnapshot): RunMessage {
+  return {
+    id: message.id,
+    index: message.index,
+    role: message.role,
+    text: message.text ?? null,
+    status: "completed",
+    tool_call_ids: message.tool_calls.map((call) => call.id),
+    created_at: message.created_at,
+  };
+}
 
 export function reduceRunState(state: RunState, action: RunAction): RunState {
-  return "snapshot" in action ? createInitialRunState(action.snapshot) : reduceRunEvent(state, action);
+  switch (action.type) {
+    case "event":
+      return reduceRunEvent(state, action.event);
+    case "snapshot":
+      // A snapshot replaces state only when it knows more: newer events, or the final
+      // numbers of a finished run. An older or equal one mid-run would drop live-only
+      // details (the streaming caret, calls waiting for their turn).
+      if (action.force || knowsMore(state, action.snapshot)) return createInitialRunState(action.snapshot);
+      // Same events, still running: keep the live state but take the model calls,
+      // which only snapshots carry.
+      if (action.snapshot.snapshot_cursor === state.cursor) return { ...state, model_calls: action.snapshot.model_calls };
+      return state;
+    case "stop-accepted":
+      // Status only: a running run keeps its stopwatch going, a paused one stays stopped.
+      return FINISHED_STATUSES.has(state.status) ? state : { ...state, status: "cancelling" };
+  }
+}
+
+function knowsMore(state: RunState, snapshot: RunSnapshot): boolean {
+  if (snapshot.snapshot_cursor !== state.cursor) return snapshot.snapshot_cursor > state.cursor;
+  return FINISHED_STATUSES.has(snapshot.status);
 }
 
 export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
-  // Never advance past a missing event; a fresh snapshot repairs the gap.
-  if (event.run_id !== state.id || event.sequence <= state.cursor) return state;
+  if (event.run_id !== state.id || event.sequence <= state.cursor) return state; // duplicate or another run
+  // Never apply an event after a missing one; a fresh snapshot repairs the gap.
   if (event.sequence !== state.cursor + 1) return { ...state, has_sequence_gap: true };
 
-  const nextSeen = [...state.seen_sequences, event.sequence];
-  const nextCursor = Math.max(state.cursor, event.sequence);
+  const next = applyEvent(state, event);
+  return { ...next, cursor: event.sequence, events: [...state.events, event], has_sequence_gap: false };
+}
 
-  let nextStatus = state.status;
-  let nextStepCount = state.step_count;
-  let nextToolCallCount = state.tool_call_count;
-  let nextTotalTokens = state.total_tokens;
-  let nextTokenUsageComplete = state.token_usage_complete;
-  let nextCostIsUpperBound = state.cost_is_upper_bound;
-  let nextEstimatedCost = state.estimated_cost_usd;
-  let nextError = state.error;
-
-  const toolCalls = state.tool_calls.map(call => ({ ...call }));
-  const callsById = new Map(toolCalls.map(call => [call.id, call]));
-  const messages = state.messages.map((message) => ({
-    ...message,
-    tool_calls: message.tool_calls.map(call => callsById.get(call.id) ?? { ...call }),
-  }));
-  const approvals = [...state.approvals];
-  let pendingApproval = state.pending_approval;
-
-  const payload = event.payload ?? {};
-
+function applyEvent(state: RunState, event: RunEvent): RunState {
+  const payload = event.payload;
+  const at = event.occurred_at;
   switch (event.type) {
     case "run.queued":
-      nextStatus = "queued";
-      break;
-
+      return withStatus(state, "queued", at);
     case "run.started":
-      nextStatus = "running";
-      break;
-
-    case "message.delta": {
-      const messageId = String(payload.message_id);
-      const delta = String(payload.delta ?? "");
-      const msgIndex = messages.findIndex((m) => m.id === messageId);
-      if (msgIndex >= 0) {
-        messages[msgIndex] = {
-          ...messages[msgIndex],
-          text: (messages[msgIndex].text ?? "") + delta,
-        };
-      } else {
-        const newMsg: MessageSnapshot = {
-          id: messageId,
-          index: messages.length,
-          role: "assistant",
-          text: delta,
-          tool_calls: [],
-          created_at: event.occurred_at,
-        };
-        messages.push(newMsg);
-      }
-      break;
-    }
-
-    case "message.completed": {
-      const messageId = String(payload.message_id);
-      const msgIndex = messages.findIndex((m) => m.id === messageId);
-      if (msgIndex >= 0) {
-        messages[msgIndex] = {
-          ...messages[msgIndex],
-          text: payload.text !== undefined ? (payload.text as string | null) : messages[msgIndex].text,
-        };
-      } else {
-        messages.push({ id: messageId, index: messages.length, role: "assistant",
-          text: payload.text as string | null, tool_calls: [], created_at: event.occurred_at });
-      }
-      nextStepCount += 1;
-      break;
-    }
-
-    case "tool.requested": {
-      const toolCallId = String(payload.tool_call_id);
-      const providerCallId = String(payload.provider_call_id ?? "");
-      const toolName = String(payload.name ?? "");
-      const args = (payload.arguments as Record<string, unknown>) ?? {};
-
-      let call = toolCalls.find((c) => c.id === toolCallId);
-      if (!call) {
-        call = {
-          id: toolCallId,
-          provider_call_id: providerCallId,
-          name: toolName,
-          arguments: args,
-          status: "requested",
-        };
-        toolCalls.push(call);
-      } else {
-        call.arguments = args;
-        call.status = "requested";
-      }
-
-      // Attach to the active assistant message if not already present
-      const lastMsg = messages[messages.length - 1];
-      if (lastMsg && lastMsg.role === "assistant") {
-        if (!lastMsg.tool_calls.some((c) => c.id === toolCallId)) {
-          lastMsg.tool_calls.push(call);
-        }
-      }
-      break;
-    }
-
-    case "tool.started": {
-      const toolCallId = String(payload.tool_call_id);
-      const call = toolCalls.find((c) => c.id === toolCallId);
-      if (call) {
-        call.status = "running";
-        call.started_at = event.occurred_at;
-      }
-      nextToolCallCount = Math.max(nextToolCallCount, nextToolCallCount + 1);
-      break;
-    }
-
-    case "tool.completed": {
-      const toolCallId = String(payload.tool_call_id);
-      const call = toolCalls.find((c) => c.id === toolCallId);
-      if (call) {
-        call.status = "completed";
-        call.result = payload.result as ToolResult;
-        call.completed_at = event.occurred_at;
-      }
-      break;
-    }
-
-    case "tool.failed": {
-      const toolCallId = String(payload.tool_call_id);
-      const call = toolCalls.find((c) => c.id === toolCallId);
-      if (call) {
-        call.status = "failed";
-        call.error = String(payload.message ?? payload.code ?? "Tool failed");
-        call.result = {
-          ok: false,
-          error: {
-            code: String(payload.code ?? "TOOL_ERROR"),
-            message: String(payload.message ?? "Tool failed"),
-          },
-        };
-        call.completed_at = event.occurred_at;
-      }
-      break;
-    }
-
-    case "approval.required": {
-      nextStatus = "awaiting_approval";
-      const approvalId = String(payload.approval_id);
-      const toolCallId = String(payload.tool_call_id);
-      const toolName = String(payload.tool_name ?? "issue_refund");
-      const proposedArgs = (payload.proposed_arguments as Record<string, unknown>) ?? {};
-
-      const approval: ApprovalSnapshot = {
-        id: approvalId,
-        tool_call_id: toolCallId,
-        tool_name: toolName,
-        proposed_arguments: proposedArgs,
-        status: "pending",
-      };
-
-      const existingIndex = approvals.findIndex((a) => a.id === approvalId);
-      if (existingIndex >= 0) {
-        approvals[existingIndex] = approval;
-      } else {
-        approvals.push(approval);
-      }
-      pendingApproval = approval;
-      break;
-    }
-
-    case "approval.decided": {
-      const approvalId = String(payload.approval_id);
-      const decisionStatus = payload.status as ApprovalStatus;
-      const reason = payload.reason as string | null | undefined;
-
-      const appIndex = approvals.findIndex((a) => a.id === approvalId);
-      if (appIndex >= 0) {
-        approvals[appIndex] = {
-          ...approvals[appIndex],
-          status: decisionStatus,
-          reason: reason ?? approvals[appIndex].reason,
-          decided_at: event.occurred_at,
-        };
-      }
-
-      if (pendingApproval && pendingApproval.id === approvalId) {
-        pendingApproval = null;
-      }
-      break;
-    }
-
-    case "usage.updated": {
-      if (typeof payload.total_tokens === "number") {
-        nextTotalTokens = payload.total_tokens;
-      }
-      if (typeof payload.token_usage_complete === "boolean") {
-        nextTokenUsageComplete = payload.token_usage_complete;
-      }
-      if (typeof payload.cost_is_upper_bound === "boolean") {
-        nextCostIsUpperBound = payload.cost_is_upper_bound;
-      }
-      if (typeof payload.estimated_cost_usd === "string" || payload.estimated_cost_usd === null) {
-        nextEstimatedCost = payload.estimated_cost_usd as string | null;
-      }
-      break;
-    }
-
+      return withStatus(state, "running", at);
     case "run.completed":
-      nextStatus = "completed";
-      break;
-
-    case "run.failed":
-      nextStatus = "failed";
-      nextError = String(payload.message ?? payload.code ?? "Run failed");
-      break;
-
+      return withStatus(state, "completed", at);
     case "run.cancelled":
-      nextStatus = "cancelled";
-      break;
+      return withStatus(state, "cancelled", at);
+    case "run.failed":
+      return {
+        ...withStatus(state, "failed", at),
+        error: asString(payload.message) ?? "The run failed.",
+        error_code: asString(payload.code),
+      };
+    case "message.delta":
+      return appendDelta(state, asString(payload.message_id), asString(payload.delta) ?? "", at);
+    case "message.completed":
+      return completeMessage(state, payload, at);
+    case "tool.requested":
+      return requestTool(state, payload);
+    case "tool.started":
+      return {
+        ...updateCall(state, asString(payload.tool_call_id), (call) => ({ ...call, status: "running", started_at: at })),
+        tool_call_count: state.tool_call_count + 1,
+      };
+    case "tool.completed":
+      return updateCall(state, asString(payload.tool_call_id), (call) => ({
+        ...call,
+        status: "completed",
+        result: isToolResult(payload.result) ? payload.result : { ok: true, data: payload.result ?? null },
+        error: null,
+        completed_at: at,
+      }));
+    case "tool.failed":
+      return updateCall(state, asString(payload.tool_call_id), (call) => failCall(call, payload, at));
+    case "approval.required":
+      return requireApproval(state, payload, at);
+    case "approval.decided":
+      return decideApproval(state, payload, at);
+    case "usage.updated":
+      return {
+        ...state,
+        total_tokens: asNumber(payload.total_tokens) ?? state.total_tokens,
+        token_usage_complete: asBoolean(payload.token_usage_complete) ?? state.token_usage_complete,
+        cost_is_upper_bound: asBoolean(payload.cost_is_upper_bound) ?? state.cost_is_upper_bound,
+        estimated_cost_usd:
+          "estimated_cost_usd" in payload ? asString(payload.estimated_cost_usd) : state.estimated_cost_usd,
+      };
+    default:
+      return state;
+  }
+}
+
+/** Changes the run status and keeps the active-time stopwatch in step with it. */
+function withStatus(state: RunState, status: RunStatus, at: string): RunState {
+  const isRunning = RUNNING_STATUSES.has(status);
+  if (state.active_since !== null && !isRunning) {
+    const elapsed = Date.parse(at) - Date.parse(state.active_since);
+    const interval = Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
+    return { ...state, status, active_elapsed_ms: state.active_elapsed_ms + interval, active_since: null };
+  }
+  if (state.active_since === null && isRunning) return { ...state, status, active_since: at };
+  return { ...state, status };
+}
+
+function nextMessageIndex(messages: RunMessage[]): number {
+  return messages.length === 0 ? 0 : messages[messages.length - 1].index + 1;
+}
+
+function replaceAt<T>(items: T[], index: number, item: T): T[] {
+  const copy = items.slice();
+  copy[index] = item;
+  return copy;
+}
+
+function appendDelta(state: RunState, messageId: string | null, delta: string, at: string): RunState {
+  if (!messageId) return state;
+  const index = state.messages.findIndex((message) => message.id === messageId);
+  if (index === -1) {
+    const message: RunMessage = {
+      id: messageId,
+      index: nextMessageIndex(state.messages),
+      role: "assistant",
+      text: delta,
+      status: "streaming",
+      tool_call_ids: [],
+      created_at: at,
+    };
+    // The backend counts a turn when it creates the assistant message.
+    return { ...state, messages: [...state.messages, message], step_count: state.step_count + 1 };
+  }
+  const current = state.messages[index];
+  const updated: RunMessage = { ...current, text: (current.text ?? "") + delta, status: "streaming" };
+  return { ...state, messages: replaceAt(state.messages, index, updated) };
+}
+
+function completeMessage(state: RunState, payload: Record<string, unknown>, at: string): RunState {
+  const messageId = asString(payload.message_id);
+  if (!messageId) return state;
+  const status: MessageStatus = payload.status === "failed" ? "failed" : "completed";
+  // The completed text is authoritative when present (null for tool-only turns).
+  const hasText = "text" in payload;
+  const text = asString(payload.text);
+  const pending = state.pending_tool_call_ids;
+  const index = state.messages.findIndex((message) => message.id === messageId);
+
+  if (index === -1) {
+    const message: RunMessage = {
+      id: messageId,
+      index: nextMessageIndex(state.messages),
+      role: "assistant",
+      text,
+      status,
+      tool_call_ids: pending,
+      created_at: at,
+    };
+    return {
+      ...state,
+      messages: [...state.messages, message],
+      pending_tool_call_ids: [],
+      step_count: state.step_count + 1,
+    };
   }
 
+  const current = state.messages[index];
+  const newCalls = pending.filter((id) => !current.tool_call_ids.includes(id));
+  const updated: RunMessage = {
+    ...current,
+    text: hasText ? text : current.text,
+    status,
+    tool_call_ids: newCalls.length > 0 ? [...current.tool_call_ids, ...newCalls] : current.tool_call_ids,
+  };
+  return { ...state, messages: replaceAt(state.messages, index, updated), pending_tool_call_ids: [] };
+}
+
+function requestTool(state: RunState, payload: Record<string, unknown>): RunState {
+  const id = asString(payload.tool_call_id);
+  if (!id) return state;
+  const requested: ToolCallSnapshot = {
+    id,
+    provider_call_id: asString(payload.provider_call_id) ?? "",
+    name: asString(payload.name) ?? "unknown_tool",
+    arguments: isRecord(payload.arguments) ? payload.arguments : {},
+    status: "requested",
+  };
+  const exists = state.tool_calls.some((call) => call.id === id);
+  const tool_calls = exists
+    ? state.tool_calls.map((call) => (call.id === id ? { ...call, ...requested } : call))
+    : [...state.tool_calls, requested];
+  const attached =
+    state.pending_tool_call_ids.includes(id) || state.messages.some((message) => message.tool_call_ids.includes(id));
   return {
     ...state,
-    status: nextStatus,
-    step_count: nextStepCount,
-    tool_call_count: nextToolCallCount,
-    total_tokens: nextTotalTokens,
-    token_usage_complete: nextTokenUsageComplete,
-    cost_is_upper_bound: nextCostIsUpperBound,
-    estimated_cost_usd: nextEstimatedCost,
-    error: nextError,
-    messages,
-    tool_calls: toolCalls,
-    approvals,
-    pending_approval: pendingApproval,
-    cursor: nextCursor,
-    seen_sequences: nextSeen,
-    has_sequence_gap: false,
+    tool_calls,
+    pending_tool_call_ids: attached ? state.pending_tool_call_ids : [...state.pending_tool_call_ids, id],
   };
+}
+
+function updateCall(
+  state: RunState,
+  id: string | null,
+  update: (call: ToolCallSnapshot) => ToolCallSnapshot,
+): RunState {
+  if (!id || !state.tool_calls.some((call) => call.id === id)) return state;
+  return { ...state, tool_calls: state.tool_calls.map((call) => (call.id === id ? update(call) : call)) };
+}
+
+function failCall(call: ToolCallSnapshot, payload: Record<string, unknown>, at: string): ToolCallSnapshot {
+  const code = asString(payload.code) ?? "TOOL_ERROR";
+  const message = asString(payload.message) ?? "The tool call failed.";
+  return {
+    ...call,
+    status: "failed",
+    result: isToolResult(payload.result) ? payload.result : { ok: false, error: { code, message } },
+    error: message,
+    completed_at: at,
+  };
+}
+
+function requireApproval(state: RunState, payload: Record<string, unknown>, at: string): RunState {
+  const id = asString(payload.approval_id);
+  const toolCallId = asString(payload.tool_call_id);
+  if (!id || !toolCallId) return state;
+  const approval: ApprovalSnapshot = {
+    id,
+    tool_call_id: toolCallId,
+    tool_name: asString(payload.tool_name) ?? "issue_refund",
+    proposed_arguments: isRecord(payload.proposed_arguments) ? payload.proposed_arguments : {},
+    status: "pending",
+    reason: null,
+    decided_at: null,
+  };
+  const exists = state.approvals.some((item) => item.id === id);
+  const paused = withStatus(state, "awaiting_approval", at);
+  return {
+    ...updateCall(paused, toolCallId, (call) => ({ ...call, status: "awaiting_approval" })),
+    approvals: exists
+      ? state.approvals.map((item) => (item.id === id ? approval : item))
+      : [...state.approvals, approval],
+    pending_approval: approval,
+  };
+}
+
+function decideApproval(state: RunState, payload: Record<string, unknown>, at: string): RunState {
+  const id = asString(payload.approval_id);
+  const status = asString(payload.status);
+  if (!id || !status || !APPROVAL_STATUSES.has(status)) return state;
+  const approvals = state.approvals.map((item) =>
+    item.id === id
+      ? { ...item, status: status as ApprovalStatus, reason: asString(payload.reason) ?? item.reason ?? null, decided_at: at }
+      : item,
+  );
+  const pending_approval = state.pending_approval?.id === id ? null : state.pending_approval;
+  return { ...state, approvals, pending_approval };
+}
+
+function isToolResult(value: unknown): value is ToolResult {
+  if (!isRecord(value)) return false;
+  if (value.ok === true) return "data" in value;
+  return value.ok === false && isRecord(value.error);
 }

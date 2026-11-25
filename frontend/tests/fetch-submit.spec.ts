@@ -31,8 +31,8 @@ test("goal submission uses the console origin and navigates after HTTP 202", asy
 
   await page.goto("/");
   const origin = new URL(page.url()).origin;
-  await page.getByLabel(/Operations Goal/i).fill(GOAL);
-  await page.getByRole("button", { name: "Run OpsPilot Agent" }).click();
+  await page.getByLabel(/Operations goal/i).fill(GOAL);
+  await page.getByRole("button", { name: "Start run" }).click();
   await page.waitForURL(`${origin}/runs/${RUN_ID}`);
 
   expect(requestUrl).toBe(`${origin}/api/runs`);
@@ -46,10 +46,24 @@ test("a network failure keeps the goal and displays recovery instructions", asyn
   });
 
   await page.goto("/");
-  await page.getByLabel(/Operations Goal/i).fill(GOAL);
-  await page.getByRole("button", { name: "Run OpsPilot Agent" }).click();
+  await page.getByLabel(/Operations goal/i).fill(GOAL);
+  await page.getByRole("button", { name: "Start run" }).click();
 
-  await expect(page.getByRole("alert")).toContainText(/backend services are running/i);
-  await expect(page.getByLabel(/Operations Goal/i)).toHaveValue(GOAL);
-  await expect(page.getByRole("button", { name: "Run OpsPilot Agent" })).toBeEnabled();
+  const alert = page.getByRole("alert").filter({ hasText: "The run was not started" });
+  await expect(alert).toContainText(/backend services are running/i);
+  await expect(page.getByLabel(/Operations goal/i)).toHaveValue(GOAL);
+  await expect(page.getByRole("button", { name: "Start run" })).toBeEnabled();
+});
+
+test("Ctrl+Enter submits, and a blank goal is refused without a request", async ({ page }) => {
+  let posts = 0;
+  await page.route("**/runs", async (route) => {
+    if (route.request().method() === "POST") posts += 1;
+    await route.abort("failed");
+  });
+  await page.goto("/");
+  await page.getByLabel(/Operations goal/i).fill("   ");
+  await page.getByLabel(/Operations goal/i).press("Control+Enter");
+  await expect(page.getByRole("alert").filter({ hasText: "Enter a goal for the agent." })).toBeVisible();
+  expect(posts).toBe(0);
 });

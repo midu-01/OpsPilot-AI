@@ -194,7 +194,22 @@ async function request<T>(
     throw new ApiError(response.status, `Request failed (${response.status}): ${detail || response.statusText}`, detail);
   }
 
-  return response.json();
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new ApiError(502, "The backend returned a response that is not JSON.");
+  }
+}
+
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Path for one run. IDs come from the URL, so anything that is not a UUID is rejected
+ * here with the same 422 the backend would send (this also stops "." and ".." segments).
+ */
+function runPath(runId: string, suffix = ""): string {
+  if (!RUN_ID.test(runId)) throw new ApiError(422, "Invalid run ID", "Invalid run ID");
+  return `/runs/${runId}${suffix}`;
 }
 
 export async function createRun(goal: string, options?: { signal?: AbortSignal }): Promise<RunSummary> {
@@ -217,10 +232,15 @@ export async function listRuns(
 }
 
 export async function getRun(runId: string, options?: { signal?: AbortSignal }): Promise<RunSnapshot> {
-  return request<RunSnapshot>(`/runs/${runId}`, {
+  const snapshot = await request<RunSnapshot>(runPath(runId), {
     method: "GET",
     signal: options?.signal,
   });
+  // The console builds its state from these fields; fail clearly if they are missing.
+  if (!Array.isArray(snapshot?.messages) || !Array.isArray(snapshot.events) || !Number.isSafeInteger(snapshot.snapshot_cursor)) {
+    throw new ApiError(502, "The backend returned an unexpected run snapshot.");
+  }
+  return snapshot;
 }
 
 export async function decideApproval(
@@ -230,7 +250,7 @@ export async function decideApproval(
   reason?: string | null,
   options?: { signal?: AbortSignal }
 ): Promise<RunSummary> {
-  return request<RunSummary>(`/runs/${runId}/approve`, {
+  return request<RunSummary>(runPath(runId, "/approve"), {
     method: "POST",
     body: JSON.stringify({
       approval_id: approvalId,
@@ -242,38 +262,60 @@ export async function decideApproval(
 }
 
 export async function stopRun(runId: string, options?: { signal?: AbortSignal }): Promise<RunSummary> {
-  return request<RunSummary>(`/runs/${runId}/stop`, {
+  return request<RunSummary>(runPath(runId, "/stop"), {
     method: "POST",
     signal: options?.signal,
   });
 }
 
 export function getStreamUrl(runId: string, after?: number): string {
-  const url = apiUrl(`/runs/${runId}/stream`);
+  const url = apiUrl(runPath(runId, "/stream"));
   if (after !== undefined && after > 0) {
     url.searchParams.set("after", after.toString());
   }
   return url.toString();
 }
 
-export async function checkReadiness(origin: string, cancel?: AbortSignal): Promise<boolean> {
+export interface Readiness {
+  /** "unreachable" means no HTTP answer at all (network error or timeout). */
+  status: "ready" | "unavailable" | "unreachable";
+  /** Per-dependency details reported by GET /health/ready, e.g. { database: "connected" }. */
+  details: Record<string, string>;
+}
+
+const READINESS_TIMEOUT_MS = 4000;
+
+export async function getReadiness(origin: string, cancel?: AbortSignal): Promise<Readiness> {
   const controller = new AbortController();
   const abort = () => controller.abort();
-  if (cancel?.aborted) return false;
+  if (cancel?.aborted) return { status: "unreachable", details: {} };
   cancel?.addEventListener("abort", abort, { once: true });
-  const timeout = setTimeout(abort, 4000);
+  const timeout = setTimeout(abort, READINESS_TIMEOUT_MS);
 
   try {
     const response = await fetch(apiUrl("/health/ready", origin), {
       cache: "no-store",
       signal: controller.signal,
     });
-    return response.ok && (await response.json()).status === "ready";
+    const body: unknown = await response.json().catch(() => null);
+    const record = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const details: Record<string, string> = {};
+    if (record.details && typeof record.details === "object") {
+      for (const [key, value] of Object.entries(record.details)) {
+        if (typeof value === "string") details[key] = value;
+      }
+    }
+    const ready = response.ok && record.status === "ready";
+    return { status: ready ? "ready" : "unavailable", details };
   } catch {
-    return false;
+    return { status: "unreachable", details: {} };
   } finally {
     clearTimeout(timeout);
     cancel?.removeEventListener("abort", abort);
   }
+}
+
+export async function checkReadiness(origin: string, cancel?: AbortSignal): Promise<boolean> {
+  return (await getReadiness(origin, cancel)).status === "ready";
 }
 
