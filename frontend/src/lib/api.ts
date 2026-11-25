@@ -256,24 +256,46 @@ export function getStreamUrl(runId: string, after?: number): string {
   return url.toString();
 }
 
-export async function checkReadiness(origin: string, cancel?: AbortSignal): Promise<boolean> {
+export interface Readiness {
+  /** "unreachable" means no HTTP answer at all (network error or timeout). */
+  status: "ready" | "unavailable" | "unreachable";
+  /** Per-dependency details reported by GET /health/ready, e.g. { database: "connected" }. */
+  details: Record<string, string>;
+}
+
+const READINESS_TIMEOUT_MS = 4000;
+
+export async function getReadiness(origin: string, cancel?: AbortSignal): Promise<Readiness> {
   const controller = new AbortController();
   const abort = () => controller.abort();
-  if (cancel?.aborted) return false;
+  if (cancel?.aborted) return { status: "unreachable", details: {} };
   cancel?.addEventListener("abort", abort, { once: true });
-  const timeout = setTimeout(abort, 4000);
+  const timeout = setTimeout(abort, READINESS_TIMEOUT_MS);
 
   try {
     const response = await fetch(apiUrl("/health/ready", origin), {
       cache: "no-store",
       signal: controller.signal,
     });
-    return response.ok && (await response.json()).status === "ready";
+    const body: unknown = await response.json().catch(() => null);
+    const record = body !== null && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const details: Record<string, string> = {};
+    if (record.details && typeof record.details === "object") {
+      for (const [key, value] of Object.entries(record.details)) {
+        if (typeof value === "string") details[key] = value;
+      }
+    }
+    const ready = response.ok && record.status === "ready";
+    return { status: ready ? "ready" : "unavailable", details };
   } catch {
-    return false;
+    return { status: "unreachable", details: {} };
   } finally {
     clearTimeout(timeout);
     cancel?.removeEventListener("abort", abort);
   }
+}
+
+export async function checkReadiness(origin: string, cancel?: AbortSignal): Promise<boolean> {
+  return (await getReadiness(origin, cancel)).status === "ready";
 }
 
