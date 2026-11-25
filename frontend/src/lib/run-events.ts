@@ -80,7 +80,8 @@ export interface RunState {
 
 export type RunAction =
   | { type: "event"; event: RunEvent }
-  | { type: "snapshot"; snapshot: RunSnapshot }
+  /** `force` replaces state even with an older cursor (the server reported ours is ahead of it). */
+  | { type: "snapshot"; snapshot: RunSnapshot; force?: boolean }
   /** POST /stop succeeded. No event announces `cancelling`, so it is applied locally. */
   | { type: "stop-accepted" };
 
@@ -143,7 +144,8 @@ export function reduceRunState(state: RunState, action: RunAction): RunState {
       return reduceRunEvent(state, action.event);
     case "snapshot":
       // Never go backwards: the stream may already have applied newer events.
-      return action.snapshot.snapshot_cursor < state.cursor ? state : createInitialRunState(action.snapshot);
+      if (!action.force && action.snapshot.snapshot_cursor < state.cursor) return state;
+      return createInitialRunState(action.snapshot);
     case "stop-accepted":
       // Status only: a running run keeps its stopwatch going, a paused one stays stopped.
       return FINISHED_STATUSES.has(state.status) ? state : { ...state, status: "cancelling" };

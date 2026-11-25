@@ -495,3 +495,11 @@ test("a failed run keeps the error code for a readable title", () => {
   assert.equal(state.error_code, "MODEL_TIMEOUT");
   assert.equal(state.error, "The model turn timed out.");
 });
+
+test("a forced snapshot replaces state even when its cursor is older", () => {
+  const { events } = draftScenario();
+  const live = replay(QUEUED_SNAPSHOT, events);
+  const forced = reduceRunState(live, { type: "snapshot", snapshot: QUEUED_SNAPSHOT, force: true });
+  assert.equal(forced.cursor, 1);
+  assert.equal(forced.status, "queued");
+});

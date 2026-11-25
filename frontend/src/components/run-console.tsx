@@ -1,16 +1,9 @@
 "use client";
 
-import { useEffect, useReducer, useRef, useState, useCallback } from "react";
+import { useState } from "react";
 import Link from "next/link";
-import {
-  type RunSnapshot,
-  getRun,
-  stopRun,
-  getStreamUrl,
-  ApiError,
-} from "../lib/api";
-import { createInitialRunState, reduceRunEvent, reduceRunState } from "../lib/run-events";
-import { readRunEvents } from "../lib/run-stream";
+import { type RunSnapshot, stopRun, ApiError } from "../lib/api";
+import { useRunStream } from "../features/run-console/use-run-stream";
 import RunTimeline from "./run-timeline";
 import ApprovalCard from "./approval-card";
 
@@ -19,126 +12,15 @@ interface RunConsoleProps {
 }
 
 export default function RunConsole({ initialSnapshot }: RunConsoleProps) {
-  const [state, dispatch] = useReducer(reduceRunState, initialSnapshot, createInitialRunState);
-  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "live" | "reconnecting" | "idle" | "error">("connecting");
+  const { state, connection, refresh, markStopping } = useRunStream(initialSnapshot);
   const [isStopping, setIsStopping] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  const stateRef = useRef(state);
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
-
   const isTerminal =
     state.status === "completed" || state.status === "failed" || state.status === "cancelled";
-  const effectiveConnectionStatus = isTerminal ? "idle" : connectionStatus;
-
-  const reconcile = useCallback(async (signal?: AbortSignal) => {
-    const fresh = await getRun(state.id, { signal });
-    if (!signal?.aborted) {
-      stateRef.current = createInitialRunState(fresh);
-      dispatch({ type: "snapshot", snapshot: fresh });
-    }
-  }, [state.id]);
-
-  // Connect to SSE stream
-  useEffect(() => {
-    if (isTerminal) {
-      return;
-    }
-
-    let isMounted = true;
-    const abortController = new AbortController();
-    let retryTimeout: ReturnType<typeof setTimeout> | null = null;
-    let resolveRetry: (() => void) | null = null;
-    let backoffMs = 1000;
-
-    async function streamLoop() {
-      while (isMounted) {
-        const currentCursor = stateRef.current.cursor;
-        const currentStatus = stateRef.current.status;
-        const isCurrentlyTerminal =
-          currentStatus === "completed" ||
-          currentStatus === "failed" ||
-          currentStatus === "cancelled";
-
-        if (isCurrentlyTerminal) {
-          if (isMounted) setConnectionStatus("idle");
-          break;
-        }
-
-        try {
-          if (isMounted) {
-            setConnectionStatus(currentCursor > 0 ? "live" : "connecting");
-          }
-
-          const streamUrl = getStreamUrl(state.id, currentCursor);
-          const response = await fetch(streamUrl, {
-            headers: {
-              "Last-Event-ID": String(currentCursor),
-            },
-            signal: abortController.signal,
-          });
-
-          if (response.status === 204) {
-            await reconcile(abortController.signal);
-            if (isMounted) setConnectionStatus("idle");
-            break;
-          }
-
-          if (!response.ok) {
-            throw new Error(`SSE stream returned status ${response.status}`);
-          }
-
-          if (isMounted) setConnectionStatus("live");
-          let lastSequence = currentCursor;
-          for await (const event of readRunEvents(response)) {
-            if (!isMounted) break;
-            if (event.run_id !== state.id) throw new Error("The stream belongs to a different run.");
-            if (event.sequence <= lastSequence) continue;
-            if (event.sequence !== lastSequence + 1) throw new Error("A run event is missing; refreshing the trace.");
-            lastSequence = event.sequence;
-            stateRef.current = reduceRunEvent(stateRef.current, event);
-            dispatch({ type: "event", event });
-            backoffMs = 1000;
-          }
-          if (!isMounted) break;
-          await reconcile(abortController.signal);
-          const status = stateRef.current.status;
-          if (status !== "completed" && status !== "failed" && status !== "cancelled") {
-            throw new Error("The live stream disconnected before the run finished.");
-          }
-        } catch (err: unknown) {
-          if (!isMounted) break;
-          if (err instanceof Error && err.name === "AbortError") {
-            break;
-          }
-
-          setConnectionStatus("reconnecting");
-          try {
-            await reconcile(abortController.signal);
-          } catch {
-            if (isMounted) setConnectionStatus("error");
-          }
-          if (!isMounted) break;
-          await new Promise<void>((resolve) => {
-            resolveRetry = resolve;
-            retryTimeout = setTimeout(resolve, backoffMs);
-          });
-          backoffMs = Math.min(backoffMs * 1.5, 8000);
-        }
-      }
-    }
-
-    void streamLoop();
-
-    return () => {
-      isMounted = false;
-      abortController.abort();
-      if (retryTimeout) clearTimeout(retryTimeout);
-      resolveRetry?.();
-    };
-  }, [state.id, isTerminal, reconcile]);
+  const effectiveConnectionStatus =
+    connection === "offline" ? "error" : connection === "live" || connection === "reconnecting" ? connection : "idle";
+  const reconcile = refresh;
 
   // Handle Stop button
   async function handleStop() {
@@ -146,7 +28,7 @@ export default function RunConsole({ initialSnapshot }: RunConsoleProps) {
     setActionError(null);
     try {
       await stopRun(state.id);
-      await reconcile();
+      markStopping();
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setActionError("Run is already terminal or cannot be stopped.");
