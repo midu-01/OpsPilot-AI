@@ -6,6 +6,9 @@ import {
   parsePolicySearchData,
   parseRefundReceipt,
   type ParsedResult,
+  type PolicyMatch,
+  type PolicyMatchReason,
+  type PolicySearchData,
 } from "./tool-data.ts";
 
 /**
@@ -13,6 +16,10 @@ import {
  *   summarizeToolCall   -> what the agent asked for  ("Late orders over $500.00, shipped Jan 1 – Feb 1, 2026")
  *   summarizeToolResult -> what came back             ("10 orders")
  * Unknown tools get a generic "key: value" summary.
+ *
+ * The search_policies view takes its words from here too, so they are unit-tested:
+ *   describeMatchReasons  -> why one policy matched   ("Keyword", "Meaning 71%")
+ *   summarizePolicySearch -> the footer               ("3 of 8 policies matched "late shipment refund" · hybrid search")
  */
 
 export function summarizeToolCall(name: string, args: Record<string, unknown>, timeZone = "UTC"): string {
@@ -122,4 +129,42 @@ export function summarizeToolResult(name: string, result: ParsedResult): string 
     default:
       return null;
   }
+}
+
+// --- search_policies view ----------------------------------------------------------
+
+/** One "why it matched" badge. */
+export interface MatchReasonBadge {
+  reason: PolicyMatchReason;
+  /** Short visible text: "Meaning 71%". */
+  text: string;
+  /** The full reason for screen readers: "Matched by meaning, 71% similar". */
+  label: string;
+}
+
+const MATCH_REASON_WORDS: Record<PolicyMatchReason, { text: string; label: string }> = {
+  id: { text: "Policy ID", label: "Matched by policy ID" },
+  keyword: { text: "Keyword", label: "Matched by keyword" },
+  semantic: { text: "Meaning", label: "Matched by meaning" },
+};
+
+/** One badge per reason, in the backend's order. A meaning match adds its similarity as a whole percentage. */
+export function describeMatchReasons(match: PolicyMatch): MatchReasonBadge[] {
+  return match.matchedBy.map((reason) => {
+    const { text, label } = MATCH_REASON_WORDS[reason];
+    if (reason !== "semantic" || match.similarity === null) return { reason, text, label };
+    const percent = `${Math.round(match.similarity * 100)}%`;
+    return { reason, text: `${text} ${percent}`, label: `${label}, ${percent} similar` };
+  });
+}
+
+/**
+ * The view's footer line. Results saved before hybrid search have no mode, so they keep their original
+ * sentence, full stop included. Null when the backend did not say how many policies exist.
+ */
+export function summarizePolicySearch(data: PolicySearchData): string | null {
+  if (data.totalPolicies === null) return null;
+  const quoted = data.query ? ` "${data.query}"` : "";
+  const sentence = `${data.matches.length} of ${data.totalPolicies} policies matched${quoted}`;
+  return data.searchMode === null ? `${sentence}.` : `${sentence} · ${data.searchMode} search`;
 }

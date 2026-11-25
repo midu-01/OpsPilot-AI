@@ -63,6 +63,74 @@ test("policy matches keep id, title, version and excerpt", () => {
   assert.equal(parsePolicySearchData({}), null);
 });
 
+test("policy matches say why they matched, and the result says how it searched", () => {
+  const data = parsePolicySearchData({
+    query: "late shipment refund",
+    matches: [
+      {
+        id: "LATE-01",
+        title: "Late shipment eligibility",
+        version: "v1",
+        file: "02-late-shipment-eligibility.md",
+        excerpt: "An order is late when it ships after the promised date.",
+        relevance_score: 0.0328,
+        matched_by: ["keyword", "semantic"],
+        similarity: 0.71,
+      },
+      { id: "EMAIL-01", title: "Email drafts", matched_by: ["id"], similarity: null },
+    ],
+    total_policies: 8,
+    search: { mode: "hybrid", embedding_model: "test-model" },
+  });
+  assert.deepEqual(
+    data?.matches.map((match) => [match.id, match.matchedBy, match.similarity]),
+    [
+      ["LATE-01", ["keyword", "semantic"], 0.71],
+      ["EMAIL-01", ["id"], null],
+    ],
+  );
+  assert.equal(data?.searchMode, "hybrid");
+  assert.equal(parsePolicySearchData({ matches: [], search: { mode: "keyword" } })?.searchMode, "keyword");
+});
+
+test("policy results saved before hybrid search parse without reasons, similarity or mode", () => {
+  const data = parsePolicySearchData({
+    query: "EMAIL-01",
+    matches: [{ id: "EMAIL-01", title: "Email drafts", version: "v1", file: "07-email-drafts.md", excerpt: "Drafts only.", relevance_score: 7 }],
+    total_policies: 8,
+  });
+  assert.deepEqual(data, {
+    query: "EMAIL-01",
+    matches: [
+      { id: "EMAIL-01", title: "Email drafts", version: "v1", file: "07-email-drafts.md", excerpt: "Drafts only.", matchedBy: [], similarity: null },
+    ],
+    totalPolicies: 8,
+    message: null,
+    searchMode: null,
+  });
+});
+
+test("match reasons, similarity and search mode are read defensively", () => {
+  const firstMatch = (fields: Record<string, unknown>) => parsePolicySearchData({ matches: [{ id: "LATE-01", ...fields }] })?.matches[0];
+
+  // Unknown reasons are dropped, repeats collapse, and the order is always id, keyword, semantic.
+  assert.deepEqual(firstMatch({ matched_by: ["semantic", "vibes", 3, "id", "semantic"] })?.matchedBy, ["id", "semantic"]);
+  assert.deepEqual(firstMatch({ matched_by: "keyword" })?.matchedBy, []);
+  assert.deepEqual(firstMatch({ matched_by: null })?.matchedBy, []);
+
+  // A similarity is shown as a percentage, so only numbers from 0 to 1 are kept.
+  assert.equal(firstMatch({ similarity: 0 })?.similarity, 0);
+  assert.equal(firstMatch({ similarity: 1 })?.similarity, 1);
+  for (const similarity of ["0.7", 1.5, -0.2, null, undefined]) {
+    assert.equal(firstMatch({ similarity })?.similarity, null, `similarity ${String(similarity)}`);
+  }
+
+  // An unknown or malformed search mode is treated as unknown.
+  for (const search of [{ mode: "vector" }, { mode: null }, {}, "hybrid", null, undefined]) {
+    assert.equal(parsePolicySearchData({ matches: [], search })?.searchMode, null, `search ${JSON.stringify(search)}`);
+  }
+});
+
 test("date math results are read per operation", () => {
   assert.equal(
     parseDateMathData({ operation: "previous_month", reference_date: "2026-02-15", start: "2026-01-01", end: "2026-02-01", days_in_month: 31 })?.operation,

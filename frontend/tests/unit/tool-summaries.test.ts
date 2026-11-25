@@ -1,6 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { summarizeToolCall, summarizeToolResult } from "../../src/lib/tool-summaries.ts";
+import { parsePolicySearchData, type PolicyMatch, type PolicySearchData } from "../../src/lib/tool-data.ts";
+import {
+  describeMatchReasons,
+  summarizePolicySearch,
+  summarizeToolCall,
+  summarizeToolResult,
+} from "../../src/lib/tool-summaries.ts";
+
+function policyMatch(id: string, matchedBy: PolicyMatch["matchedBy"] = [], similarity: number | null = null): PolicyMatch {
+  return { id, title: id, version: "v1", file: null, excerpt: "", matchedBy, similarity };
+}
+
+function policySearch(fields: Partial<PolicySearchData>): PolicySearchData {
+  return {
+    query: "late shipment refund",
+    matches: [policyMatch("LATE-01"), policyMatch("AMOUNT-01"), policyMatch("EMAIL-01")],
+    totalPolicies: 8,
+    message: null,
+    searchMode: null,
+    ...fields,
+  };
+}
 
 test("an order query reads like a sentence", () => {
   assert.equal(
@@ -49,4 +70,49 @@ test("results summarize what came back", () => {
   assert.equal(summarizeToolResult("issue_refund", ok({ order_id: "ORD-1006", amount_minor: 8451, already_issued: true })), "$84.51 USD already recorded");
   assert.equal(summarizeToolResult("query_orders", { kind: "failure", code: "TOOL_ERROR", message: "x" }), null);
   assert.equal(summarizeToolResult("lookup_weather", ok({})), null);
+});
+
+test("a policy match says in words why it matched", () => {
+  assert.deepEqual(describeMatchReasons(policyMatch("LATE-01", ["id", "keyword", "semantic"], 0.71)), [
+    { reason: "id", text: "Policy ID", label: "Matched by policy ID" },
+    { reason: "keyword", text: "Keyword", label: "Matched by keyword" },
+    { reason: "semantic", text: "Meaning 71%", label: "Matched by meaning, 71% similar" },
+  ]);
+  // The similarity is a whole percentage.
+  assert.equal(describeMatchReasons(policyMatch("LATE-01", ["semantic"], 0.29))[0].text, "Meaning 29%");
+  assert.equal(describeMatchReasons(policyMatch("LATE-01", ["semantic"], 0.566))[0].text, "Meaning 57%");
+  assert.equal(describeMatchReasons(policyMatch("LATE-01", ["semantic"], 1))[0].label, "Matched by meaning, 100% similar");
+  // Without a similarity the badge just says "Meaning".
+  assert.deepEqual(describeMatchReasons(policyMatch("LATE-01", ["semantic"])), [
+    { reason: "semantic", text: "Meaning", label: "Matched by meaning" },
+  ]);
+  // A similarity alone is not a reason: only matched_by decides which badges show.
+  assert.deepEqual(describeMatchReasons(policyMatch("LATE-01", ["keyword"], 0.5)).map((badge) => badge.text), ["Keyword"]);
+  // Results saved before hybrid search have no reasons, so they get no badges.
+  assert.deepEqual(describeMatchReasons(policyMatch("LATE-01")), []);
+});
+
+test("the policy search footer names the search mode", () => {
+  assert.equal(
+    summarizePolicySearch(policySearch({ searchMode: "hybrid" })),
+    '3 of 8 policies matched "late shipment refund" · hybrid search',
+  );
+  assert.equal(
+    summarizePolicySearch(policySearch({ searchMode: "keyword" })),
+    '3 of 8 policies matched "late shipment refund" · keyword search',
+  );
+  assert.equal(summarizePolicySearch(policySearch({ query: null, searchMode: "hybrid" })), "3 of 8 policies matched · hybrid search");
+  assert.equal(summarizePolicySearch(policySearch({ totalPolicies: null, searchMode: "hybrid" })), null);
+});
+
+test("the footer of a policy search saved before hybrid search reads exactly as before", () => {
+  const saved = parsePolicySearchData({
+    query: "EMAIL-01",
+    matches: [{ id: "EMAIL-01", title: "Email drafts", version: "v1", file: "07-email-drafts.md", excerpt: "Drafts only.", relevance_score: 7 }],
+    total_policies: 8,
+  });
+  assert.ok(saved);
+  assert.equal(summarizePolicySearch(saved), '1 of 8 policies matched "EMAIL-01".');
+  assert.equal(summarizePolicySearch(policySearch({ query: "" })), "3 of 8 policies matched.");
+  assert.equal(summarizePolicySearch(policySearch({ totalPolicies: null })), null);
 });
