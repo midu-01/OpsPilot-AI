@@ -9,12 +9,13 @@ OpsPilot AI is an operations copilot built with **Next.js 16 (App Router)** and 
 ```mermaid
 flowchart TD
   subgraph Frontend["Next.js 16 Console (App Router and TypeScript)"]
-    Composer["Goal Composer (/)"]
-    Console["Live Run Console (/runs/:id)"]
-    ApprovalUI["Human Approval Card"]
-    History["Runs History (/runs)"]
-    Reducer["Sequence-Aware Event Reducer"]
-    StreamReader["SSE ReadableStream Reader"]
+    Composer["New run page / (Server) + composer (Client)"]
+    History["Runs page /runs (Server) + auto-refresh (Client)"]
+    RunPage["Run page /runs/:id (Server: loads the snapshot)"]
+    Console["RunConsole (Client island): trace, tool views, inspector"]
+    ApprovalUI["Approval card"]
+    Reducer["Pure reducer + view models (timeline, now line, budget)"]
+    StreamReader["useRunStream + stream loop (cursor, gaps, back-off)"]
     ApiProxy["Same-origin /api proxy"]
   end
 
@@ -83,10 +84,12 @@ flowchart TD
   Broker -.->|Post-commit wake-up hint| SSEEndpoint
   SSEEndpoint -->|id, event, data frames| ApiProxy
   ApiProxy -->|Unbuffered SSE frames| StreamReader
-  StreamReader -->|Deduplicate by sequence| Reducer
+  RunPage -->|GET /runs/:id snapshot| HTTPRoutes
+  RunPage -->|Initial snapshot| Console
+  History -->|GET /runs?page=N| HTTPRoutes
+  StreamReader -->|Contiguous events only| Reducer
   Reducer --> Console
-  Reducer --> ApprovalUI
-  Reducer --> History
+  Console --> ApprovalUI
 ```
 
 ---
@@ -221,29 +224,29 @@ The agent loop dispatches four strictly typed tools:
 ## Core Scenarios to Run
 
 ### Scenario 1: Read-Only Analysis & Email Drafts (No Write Action)
-Paste this goal into the console (`/`):
+Choose the **Draft late-shipment emails** scenario on the New run page (`/`), or paste:
 > *"Find orders over \$500 that shipped late last month and draft a short refund email for each. Cite the applicable policy. Keep each email to two sentences."*
 
 - **What Happens:** The agent calls `date_math`, `query_orders`, and `search_policies`. It composes email drafts directly in its response.
-- **Verification:** No approval card appears. The simulated refund ledger has zero new entries.
+- **Verification:** No approval card appears. Each draft is an email card with its own copy button. The simulated refund ledger has zero new entries.
 
 ### Scenario 2: Explicit Refund with Human Approval
 Paste this goal:
 > *"Check the late-shipment policy and issue the eligible simulated refund for ORD-1006. Show the proposed amount and evidence for my approval."*
 
 - **What Happens:** The agent queries order `ORD-1006` (\$845.05) and policy v1 (10% up to \$100). It calculates \$84.51 USD (8,451 cents), pauses execution, and presents an **Approval Card**.
-- **Reload Survival:** Refresh the browser page (`F5`). The same approval card reappears with exact details.
-- **Decision:** Click **Approve Refund**. The worker claims the resumed run, records the simulated ledger entry, and outputs the final confirmation.
+- **Reload Survival:** Refresh the browser page (`F5`). The same approval card reappears with exact details, and the tab title says "Approval needed".
+- **Decision:** Click **Approve refund**. The worker claims the resumed run, records the simulated ledger entry, and outputs the final confirmation.
 
 ### Scenario 3: Rejection with Required Reason
 Paste this goal:
 > *"Please issue the eligible late-shipment refund for ORD-1001 and wait for my decision."*
 
-- **What Happens:** The agent pauses for `ORD-1001` (\$62.50). Click **Reject Proposal…** and enter a reason (*"Customer requested store credit"*).
+- **What Happens:** The agent pauses for `ORD-1001` (\$62.50). Click **Reject…** and enter a reason (*"Customer requested store credit"*). A blank reason is refused.
 - **Verification:** The rejection reason is passed back to the agent as a tool observation. The agent acknowledges it. Zero rows are added to the refund ledger.
 
 ### Scenario 4: Stopping a Run
-Click the **Stop Run** button on any in-flight or waiting run.
+Click **Stop** (then **Stop run** to confirm) on any queued, running, or waiting run.
 - **What Happens:** The run transitions through `cancelling` to `cancelled`. Partial output is preserved. Pending approvals are marked cancelled. Closing the browser tab does **not** cancel a run.
 
 ---
@@ -257,7 +260,10 @@ Click the **Stop Run** button on any in-flight or waiting run.
 | **Browser Transport** | Server-Sent Events (SSE) + HTTP POST | One-way SSE stream for real-time text deltas and tool lifecycle telemetry. Reconnects via `Last-Event-ID` or `?after=N` replay committed events from the database. Explicit user actions (Approve, Reject, Stop) use standard HTTP POST requests. |
 | **Network Architecture** | Same-Origin Next.js Reverse Proxy (`/api/*`) | Direct browser-to-backend requests across ports (`:8000` vs `:3000`) encounter CORS preflight and private-network permission blocks. Next.js App Router catch-all route forwards requests server-to-server to `API_INTERNAL_URL` (`http://backend:8000`) with unbuffered streaming. |
 | **Safety Guardrail** | Human-in-the-Loop Financial Boundary | Write actions (`issue_refund`) cannot execute autonomously. When proposed, the agent loop pauses, commits a pending approval record, and yields the worker. Execution only resumes after a human operator explicitly approves or rejects the action with a mandatory reason. |
-| **Output Presentation** | Structured Markdown & Dual-Mode Viewer | Email drafts follow structured Markdown formats with headers (`## **Draft Email N**`), metadata tags (`**To:**`, `**Subject:**`), horizontal dividers (`---`), and summary callouts. The console provides an interactive toggle between **Formatted View** and **Raw Markdown** with 1-click clipboard copy. |
+| **Server/Client Split** | Server pages, one client island per live view | Pages and the layout are Server Components that load data next to the backend and return expected failures as values. The run console is a single client island because everything in it follows the stream; elsewhere, client code is limited to small interactive leaves (composer, theme toggle, auto-refresh). |
+| **Live Trace State** | Pure reducer + view models + React-free stream loop | The SSE loop resumes from the snapshot cursor, accepts only contiguous sequences, reloads the snapshot on a gap or disconnect, and backs off between retries. The reducer groups tool calls the same way the server does (calls requested before their turn's `message.completed` wait for it), so the live trace and the replay match. Both are unit-tested without React. |
+| **Rendering Untrusted Output** | react-markdown without raw HTML | Model text is rendered with raw HTML dropped, images disabled and links limited to http, https and mailto. There is no `dangerouslySetInnerHTML` in the app; the theme uses a cookie read on the server instead of an inline script. Email drafts become cards with copy buttons. |
+| **Design System** | Tailwind v4 tokens + small owned components | One token table (light and dark through `light-dark()`), semantic status colors always paired with an icon and a label, Radix primitives for tabs, dialog and tooltip, and no component kit. axe checks WCAG 2.2 AA in both themes. |
 
 ---
 
@@ -315,7 +321,8 @@ cd frontend
 pnpm install --frozen-lockfile
 pnpm lint
 pnpm typecheck
-pnpm test
+pnpm test             # unit tests for src/lib (node --test)
+pnpm test:coverage    # the same, with coverage of src/lib
 pnpm build
 ```
 
@@ -326,12 +333,14 @@ export P8_PROJECT="opspilot-p8-test"
 docker compose --env-file .env.example -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml up --build --wait -d
 curl -fsS http://127.0.0.1:18000/health/ready
 curl -fsS -o /dev/null http://127.0.0.1:13000/
-(cd frontend && E2E_EXTERNAL_STACK=1 pnpm exec playwright test tests/approval-flow.spec.ts tests/draft-only.spec.ts)
+(cd frontend && pnpm exec playwright install chromium && E2E_EXTERNAL_STACK=1 pnpm exec playwright test)
 docker compose -p "$P8_PROJECT" -f compose.yaml -f compose.phase8.yaml down -v --remove-orphans
 ```
+The suite covers the draft, approval, rejection and stop journeys, route states, and axe accessibility checks in both themes. It expects a fresh stack: approving `ORD-1006` writes to the simulated ledger once.
 
 ---
 
 ## Reviewer Guides
 - **Architecture & Trace Details:** [`docs/architecture.md`](docs/architecture.md)
 - **Demo Script & Interview Rehearsal:** [`docs/demo-script.md`](docs/demo-script.md)
+- **Frontend Data Flow, Boundaries & Extension Points:** [`docs/frontend.md`](docs/frontend.md)
