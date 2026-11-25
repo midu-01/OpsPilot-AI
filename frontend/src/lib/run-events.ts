@@ -28,6 +28,12 @@ export interface RunState {
   max_tool_calls: number;
   messages: MessageSnapshot[];
   tool_calls: ToolCallSnapshot[];
+  /**
+   * Calls requested in the current model turn. `tool.requested` arrives before the
+   * turn's `message.completed` and has no message_id, so calls wait here and are
+   * attached to the message that completes next (the server groups them the same way).
+   */
+  pending_tool_call_ids: string[];
   approvals: ApprovalSnapshot[];
   pending_approval: ApprovalSnapshot | null;
   cursor: number;
@@ -71,6 +77,7 @@ export function createInitialRunState(snapshot: RunSnapshot): RunState {
     max_tool_calls: snapshot.max_tool_calls,
     messages,
     tool_calls: allToolCalls,
+    pending_tool_call_ids: [],
     approvals: structuredClone(snapshot.approvals),
     pending_approval: snapshot.pending_approval ? structuredClone(snapshot.pending_approval) : null,
     cursor: snapshot.snapshot_cursor,
@@ -109,6 +116,7 @@ export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
     ...message,
     tool_calls: message.tool_calls.map(call => callsById.get(call.id) ?? { ...call }),
   }));
+  let pendingToolCallIds = state.pending_tool_call_ids;
   const approvals = [...state.approvals];
   let pendingApproval = state.pending_approval;
 
@@ -142,6 +150,8 @@ export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
           created_at: event.occurred_at,
         };
         messages.push(newMsg);
+        // The backend counts a turn when it creates the assistant message (start_turn).
+        nextStepCount += 1;
       }
       break;
     }
@@ -157,8 +167,17 @@ export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
       } else {
         messages.push({ id: messageId, index: messages.length, role: "assistant",
           text: payload.text as string | null, tool_calls: [], created_at: event.occurred_at });
+        nextStepCount += 1;
       }
-      nextStepCount += 1;
+      // Calls requested during this turn belong to this message.
+      const completedIndex = messages.findIndex((m) => m.id === messageId);
+      const completed = messages[completedIndex];
+      const newCalls = pendingToolCallIds
+        .filter((id) => !completed.tool_calls.some((c) => c.id === id))
+        .map((id) => callsById.get(id))
+        .filter((call): call is ToolCallSnapshot => call !== undefined);
+      messages[completedIndex] = { ...completed, tool_calls: [...completed.tool_calls, ...newCalls] };
+      pendingToolCallIds = [];
       break;
     }
 
@@ -183,12 +202,10 @@ export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
         call.status = "requested";
       }
 
-      // Attach to the active assistant message if not already present
-      const lastMsg = messages[messages.length - 1];
-      if (lastMsg && lastMsg.role === "assistant") {
-        if (!lastMsg.tool_calls.some((c) => c.id === toolCallId)) {
-          lastMsg.tool_calls.push(call);
-        }
+      // The owning message is not known yet; it is the next one to complete.
+      const attached = messages.some((m) => m.tool_calls.some((c) => c.id === toolCallId));
+      if (!attached && !pendingToolCallIds.includes(toolCallId)) {
+        pendingToolCallIds = [...pendingToolCallIds, toolCallId];
       }
       break;
     }
@@ -321,6 +338,7 @@ export function reduceRunEvent(state: RunState, event: RunEvent): RunState {
     error: nextError,
     messages,
     tool_calls: toolCalls,
+    pending_tool_call_ids: pendingToolCallIds,
     approvals,
     pending_approval: pendingApproval,
     cursor: nextCursor,
