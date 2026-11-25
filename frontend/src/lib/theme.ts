@@ -13,7 +13,7 @@ export function parseThemePreference(value: string | undefined | null): ThemePre
 }
 
 /** The cookie string that stores (or, for "system", clears) the preference. */
-export function themeCookie(preference: ThemePreference): string {
+export function themeCookie(preference: ThemePreference, secure = false): string {
   const maxAge = preference === "system" ? 0 : 60 * 60 * 24 * 365;
-  return `${THEME_COOKIE}=${preference}; Path=/; Max-Age=${maxAge}; SameSite=Lax`;
+  return `${THEME_COOKIE}=${preference}; Path=/; Max-Age=${maxAge}; SameSite=Lax${secure ? "; Secure" : ""}`;
 }

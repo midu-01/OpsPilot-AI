@@ -136,3 +136,39 @@ test("closing the browser stream cancels the backend stream", async (t) => {
   await reader.cancel();
   assert.equal(cancelled, true);
 });
+
+test("writes from another origin are refused before reaching the backend", async (t) => {
+  internalApi(t);
+  const fetchMock = t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  const response = await forwardApiRequest(new Request(`http://console:3000/api/runs/${RUN_ID}/stop`, {
+    method: "POST",
+    headers: { origin: "https://evil.example", host: "console:3000" },
+  }), ["runs", RUN_ID, "stop"]);
+  assert.equal(response.status, 403);
+  assert.equal(fetchMock.mock.callCount(), 0);
+});
+
+test("same-origin writes and requests without an Origin header are forwarded", async (t) => {
+  internalApi(t);
+  t.mock.method(globalThis, "fetch", async () => Response.json({ status: "cancelling" }));
+  // Inside a container request.url is the bind address; the browser's Host is what counts.
+  const sameOrigin = await forwardApiRequest(new Request(`http://0.0.0.0:3000/api/runs/${RUN_ID}/stop`, {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1:13000", host: "127.0.0.1:13000" },
+  }), ["runs", RUN_ID, "stop"]);
+  const noOrigin = await forwardApiRequest(new Request(`http://console:3000/api/runs/${RUN_ID}/stop`, { method: "POST" }), ["runs", RUN_ID, "stop"]);
+  assert.equal(sameOrigin.status, 200);
+  assert.equal(noOrigin.status, 200);
+});
+
+test("oversized request bodies are refused", async (t) => {
+  internalApi(t);
+  const fetchMock = t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  const response = await forwardApiRequest(new Request("http://console:3000/api/runs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ goal: "x".repeat(70_000) }),
+  }), ["runs"]);
+  assert.equal(response.status, 413);
+  assert.equal(fetchMock.mock.callCount(), 0);
+});

@@ -23,6 +23,7 @@ test("theme preference accepts only light or dark overrides", () => {
 test("choosing System clears the theme cookie; other choices persist for a year", () => {
   assert.match(themeCookie("system"), /Max-Age=0/);
   assert.match(themeCookie("dark"), /^opspilot-theme=dark; Path=\/; Max-Age=31536000; SameSite=Lax$/);
+  assert.match(themeCookie("light", true), /; Secure$/);
 });
 
 test("every run status has a label, a tone and an icon", () => {

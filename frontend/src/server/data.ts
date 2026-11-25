@@ -1,3 +1,4 @@
+import "server-only"; // build error if a client component ever imports this file
 import { cache } from "react";
 import { connection } from "next/server";
 import { getReadiness, getRun, listRuns, type PaginatedRuns, type Readiness, type RunSnapshot } from "@/lib/api";

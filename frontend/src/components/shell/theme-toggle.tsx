@@ -24,7 +24,7 @@ export function ThemeToggle({ initial }: { initial: ThemePreference }) {
 
   function switchTheme() {
     setTheme(next);
-    document.cookie = themeCookie(next);
+    document.cookie = themeCookie(next, window.location.protocol === "https:");
     if (next === "system") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", next);
   }
