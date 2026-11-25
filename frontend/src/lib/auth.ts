@@ -14,8 +14,13 @@ export const SESSION_COOKIE = "opspilot_session";
 
 const LOGIN_PAGE = "/login";
 const HOME = "/";
-/** This console never links to longer paths. */
-const MAX_NEXT_LENGTH = 2048;
+/**
+ * Longer paths fall back to "/": sign-in still works, only the return trip is lost. The longest
+ * link the console builds is "Retry with this goal" (/?goal= with up to 2000 characters, about
+ * 2.2 KB of plain English once encoded). loginPath() encodes `next` again (up to 3 times longer)
+ * and Node refuses request headers over 16 KB, so with 4096 /login?next=… always loads.
+ */
+const MAX_NEXT_LENGTH = 4096;
 /** A path this console builds never contains whitespace, control characters or backslashes. */
 const UNSAFE_IN_PATH = /[\s\p{Cc}\\]/u;
 const PROBE_ORIGIN = "http://console.invalid";
@@ -33,7 +38,11 @@ function isSafeLocalPath(path: string): boolean {
   // "//host" and "/\host" are read as another host, also when a later step decodes "%2F" or "%5C" once.
   const decoded = decodeOnce(path);
   if (decoded === null || /^\/[/\\]/.test(decoded) || /\p{Cc}/u.test(decoded)) return false;
-  if (new URL(path, PROBE_ORIGIN).origin !== PROBE_ORIGIN) return false;
+  // Only a path the URL parser leaves as it is: the browser and Next's router resolve "." and
+  // ".." segments ("/.//evil.com" becomes "//evil.com", another host) and percent-encode
+  // non-ASCII characters (Next writes the redirect into a header, which must be ASCII). The
+  // paths this console builds are already in this form. This also keeps the origin.
+  if (new URL(path, PROBE_ORIGIN).href !== PROBE_ORIGIN + path) return false;
   const pathname = decoded.split(/[?#]/, 1)[0];
   return pathname !== LOGIN_PAGE && !pathname.startsWith(`${LOGIN_PAGE}/`);
 }
@@ -41,8 +50,8 @@ function isSafeLocalPath(path: string): boolean {
 /**
  * Where to send the browser after signing in. `next` comes from the URL or a form field, so
  * it is untrusted: only a path on this site is accepted, and never the sign-in page itself
- * (that would loop). Anything else, including `//evil.com`, `/\evil.com`, `https://…` and
- * `javascript:`, becomes "/".
+ * (that would loop). Anything else, including `//evil.com`, `/\evil.com`, `https://…`,
+ * `javascript:`, dot segments and raw non-ASCII characters, becomes "/".
  */
 export function safeNextPath(raw: unknown): string {
   const value = Array.isArray(raw) ? raw[0] : raw;
@@ -53,6 +62,15 @@ export function safeNextPath(raw: unknown): string {
 export function loginPath(next: string): string {
   const target = safeNextPath(next);
   return target === HOME ? LOGIN_PAGE : `${LOGIN_PAGE}?${new URLSearchParams({ next: target })}`;
+}
+
+/**
+ * The `next` that brings the user back to the new-run page with `goal` in the composer (the
+ * page reads ?goal=). Line breaks become spaces: safeNextPath refuses control characters,
+ * even percent-encoded ones. A goal too long for `next` is not restored.
+ */
+export function composerReturnPath(goal: string): string {
+  return goal ? `/?${new URLSearchParams({ goal: goal.replace(/\s+/g, " ") })}` : HOME;
 }
 
 export interface SessionCookieOptions {
@@ -88,16 +106,6 @@ export function isHttpsRequest(headers: HeaderReader): boolean {
   const forwarded = headers.get("x-forwarded-proto")?.split(",")[0].trim().toLowerCase();
   const origin = headers.get("origin")?.toLowerCase() ?? "";
   return forwarded === "https" || origin.startsWith("https://");
-}
-
-/** One cookie from a raw `Cookie` header (the /api route handler only has the plain Request). */
-export function readCookie(header: string | null | undefined, name: string): string | undefined {
-  for (const part of (header ?? "").split(";")) {
-    const separator = part.indexOf("=");
-    if (separator === -1 || part.slice(0, separator).trim() !== name) continue;
-    return decodeOnce(part.slice(separator + 1).trim()) ?? undefined;
-  }
-  return undefined;
 }
 
 /** The token from the session cookie, or null when there is none or it is not token-shaped. */

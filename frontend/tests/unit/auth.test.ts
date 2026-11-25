@@ -3,11 +3,10 @@ import test from "node:test";
 import { ApiError } from "../../src/lib/api.ts";
 import {
   INITIAL_SIGN_IN_STATE,
-  SESSION_COOKIE,
+  composerReturnPath,
   isHttpsRequest,
   loginPath,
   parseSignInForm,
-  readCookie,
   readSessionToken,
   safeNextPath,
   sessionCookieOptions,
@@ -24,7 +23,19 @@ test("safeNextPath keeps same-origin paths with their query", () => {
   assert.equal(safeNextPath("/runs?page=2"), "/runs?page=2");
   assert.equal(safeNextPath("/runs/01234567-89ab-4cde-8fab-0123456789ab"), "/runs/01234567-89ab-4cde-8fab-0123456789ab");
   assert.equal(safeNextPath("/?goal=Find%20late%20orders"), "/?goal=Find%20late%20orders");
+  assert.equal(safeNextPath("/runs/%E4%B8%AD"), "/runs/%E4%B8%AD");
   assert.equal(safeNextPath(["/runs", "/elsewhere"]), "/runs");
+});
+
+test("safeNextPath keeps the longest link the console builds, and /login?next= stays loadable", () => {
+  // "Retry with this goal" links to /?goal= with up to 2000 characters.
+  const retry = `/?${new URLSearchParams({ goal: "Refund $129.99, check the policy first. ".repeat(60).slice(0, 2000) })}`;
+  assert.ok(retry.length > 2048, "the retry link is longer than the old limit");
+  assert.equal(safeNextPath(retry), retry);
+  // The longest accepted `next`, encoded again by loginPath, stays far below Node's 16 KB header limit.
+  const longest = `/${"~".repeat(4095)}`;
+  assert.equal(safeNextPath(longest), longest);
+  assert.ok(loginPath(longest).length <= 12_300);
 });
 
 test("safeNextPath falls back to / for anything that could leave the site", () => {
@@ -54,13 +65,46 @@ test("safeNextPath falls back to / for anything that could leave the site", () =
     "runs",
     "evil.com",
     "",
-    "/".repeat(1) + "a".repeat(3000),
+    "/" + "a".repeat(5000),
   ];
   for (const raw of hostile) assert.equal(safeNextPath(raw), "/", `expected ${JSON.stringify(raw)} to be refused`);
 });
 
+test("safeNextPath refuses dot segments, which the browser resolves into another path", () => {
+  // new URL("/.//evil.com", base).pathname is "//evil.com", which Next's router treats as another host.
+  const dotted = [
+    "/.//evil.com",
+    "/%2e//evil.com",
+    "/%2E//evil.com/phish",
+    "/..//evil.com",
+    "/a/..//evil.com",
+    "/runs/..//evil.com",
+    "/a/%2e%2e//evil.com",
+    "/.%2e//evil.com",
+    "/%2e%2e/%2fevil.com",
+    "/./%2Fevil.com",
+    "/./%5Cevil.com",
+    "/runs/./abc",
+  ];
+  for (const raw of dotted) assert.equal(safeNextPath(raw), "/", `expected ${JSON.stringify(raw)} to be refused`);
+});
+
+test("safeNextPath accepts only printable ASCII, so the redirect always fits in a Location header", () => {
+  // Next writes the redirect target into a header unencoded; Node refuses non-ASCII header values.
+  assert.equal(safeNextPath("/中文"), "/");
+  assert.equal(safeNextPath("/?goal=中文"), "/");
+  assert.equal(safeNextPath("/runs#ü"), "/");
+  // The console's own links are percent-encoded (location, URLSearchParams), so they pass.
+  const prefilled = `/?${new URLSearchParams({ goal: "Prüfe die Bestellung 中文, then \"draft\" <one> email" })}`;
+  assert.equal(safeNextPath(prefilled), prefilled);
+  for (const raw of ["/中文", "/.//evil.com", "/runs?page=2", prefilled, "/a b", "/x\u007f"]) {
+    assert.match(safeNextPath(raw), /^[\x21-\x7E]+$/, `${JSON.stringify(raw)} gave a value that cannot be a header`);
+  }
+});
+
 test("safeNextPath never sends the browser back to the sign-in page", () => {
-  for (const raw of ["/login", "/login/", "/login?next=/runs", "/login#form", "/%6Cogin", "/login/../login"]) {
+  const login = ["/login", "/login/", "/login?next=/runs", "/login#form", "/%6Cogin", "/login/../login"];
+  for (const raw of [...login, "/runs/../login", "/./login", "/%2e/login", "/./%6Cogin"]) {
     assert.equal(safeNextPath(raw), "/", `expected ${raw} to be refused`);
   }
   assert.equal(safeNextPath("/loginhelp"), "/loginhelp");
@@ -102,16 +146,6 @@ test("isHttpsRequest reads the forwarded protocol or the Origin scheme", () => {
   assert.equal(isHttpsRequest(headers({ origin: "https://console.example.test" })), true);
   assert.equal(isHttpsRequest(headers({ origin: "http://127.0.0.1:13000" })), false);
   assert.equal(isHttpsRequest(headers({ origin: "null" })), false);
-});
-
-test("readCookie finds one cookie in a Cookie header", () => {
-  const header = `opspilot-theme=dark; ${SESSION_COOKIE}=${TOKEN}; other=a%20b`;
-  assert.equal(readCookie(header, SESSION_COOKIE), TOKEN);
-  assert.equal(readCookie(header, "other"), "a b");
-  assert.equal(readCookie(header, "missing"), undefined);
-  assert.equal(readCookie(null, SESSION_COOKIE), undefined);
-  assert.equal(readCookie(`x${SESSION_COOKIE}=nope`, SESSION_COOKIE), undefined);
-  assert.equal(readCookie("broken=%E0%A4%A", "broken"), undefined);
 });
 
 test("readSessionToken accepts only token-shaped values", () => {
@@ -180,10 +214,22 @@ test("failedSignIn counts attempts, keeps the email and does not trust the clien
 test("a 401 sends the browser to sign in, then back to the same page", () => {
   const visited: string[] = [];
   const location = { pathname: "/runs/abc", search: "?tab=events", assign: (url: string) => visited.push(url) };
-  assert.equal(redirectIfUnauthorized(new ApiError(401, "Sign in to continue"), location), true);
-  assert.equal(redirectIfUnauthorized(new ApiError(409, "Already decided"), location), false);
-  assert.equal(redirectIfUnauthorized(new TypeError("offline"), location), false);
+  assert.equal(redirectIfUnauthorized(new ApiError(401, "Sign in to continue"), { location }), true);
+  assert.equal(redirectIfUnauthorized(new ApiError(409, "Already decided"), { location }), false);
+  assert.equal(redirectIfUnauthorized(new TypeError("offline"), { location }), false);
   assert.deepEqual(visited, ["/login?next=%2Fruns%2Fabc%3Ftab%3Devents"]);
-  redirectToLogin({ pathname: "/", search: "", assign: (url: string) => visited.push(url) });
+  redirectToLogin({ location: { pathname: "/", search: "", assign: (url: string) => visited.push(url) } });
   assert.equal(visited.at(-1), "/login");
+});
+
+test("a 401 in the composer comes back to the new-run page with the goal filled in", () => {
+  const visited: string[] = [];
+  const location = { pathname: "/", search: "", assign: (url: string) => visited.push(url) };
+  const goal = "Find orders over $500 that shipped late,\nthen draft 50% refund emails";
+  redirectIfUnauthorized(new ApiError(401, "Sign in to continue"), { next: composerReturnPath(goal), location });
+  const next = new URL(visited[0], "http://console.test").searchParams.get("next") ?? "";
+  // The new-run page reads ?goal= back into the composer; the line break became a space.
+  assert.equal(new URL(next, "http://console.test").searchParams.get("goal"), goal.replace("\n", " "));
+  assert.equal(composerReturnPath(""), "/");
+  assert.equal(loginPath(composerReturnPath("Line one\r\n\tLine two")), `/login?${new URLSearchParams({ next: "/?goal=Line+one+Line+two" })}`);
 });

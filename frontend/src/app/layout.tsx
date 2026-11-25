@@ -3,9 +3,7 @@ import type { ReactNode } from "react";
 import { cookies } from "next/headers";
 import { GeistMono } from "geist/font/mono";
 import { GeistSans } from "geist/font/sans";
-import { AppHeader } from "@/components/shell/app-header";
 import { THEME_COOKIE, parseThemePreference } from "@/lib/theme";
-import { getCurrentUser } from "@/server/session";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -21,14 +19,13 @@ export const viewport: Viewport = {
 };
 
 /**
- * Server Component. Reading the theme cookie here lets the first HTML byte carry the
- * right theme, with no inline script. The header shows who is signed in (one GET /auth/me
- * per request, shared with the page through cache()). Every page renders per request
- * anyway, because each one shows live backend data.
+ * Server Component: only what every page shares. Reading the theme cookie here lets the first
+ * HTML byte carry the right theme, with no inline script. The header depends on the session,
+ * so it is rendered by app/(console)/layout.tsx and app/login/layout.tsx instead: Next keeps
+ * this layout across client-side navigations, so a header here would go stale.
  */
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const [cookieStore, session] = await Promise.all([cookies(), getCurrentUser()]);
-  const theme = parseThemePreference(cookieStore.get(THEME_COOKIE)?.value);
+  const theme = parseThemePreference((await cookies()).get(THEME_COOKIE)?.value);
   return (
     <html
       lang="en"
@@ -39,10 +36,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
         <a href="#main" className="skip-link">
           Skip to content
         </a>
-        <AppHeader theme={theme} session={session} />
-        <main id="main" tabIndex={-1} className="mx-auto w-full max-w-[1400px] px-4 py-6 outline-none sm:px-6 sm:py-8">
-          {children}
-        </main>
+        {children}
       </body>
     </html>
   );

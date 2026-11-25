@@ -7,11 +7,13 @@ The console is a Next.js 16 App Router app (React 19, TypeScript, Tailwind CSS v
 ```text
 frontend/src
 ├── proxy.ts                    Optimistic check: a page request without the session cookie goes to /login
-├── app/                        Routes only. Pages and the layout are Server Components.
-│   ├── page.tsx                New run (/)
-│   ├── login/page.tsx          Sign in (/login?next=…); login/actions.ts: signIn and signOut Server Actions
-│   ├── runs/page.tsx           Runs list (/runs?page=N), the signed-in user's runs only
-│   ├── runs/[id]/page.tsx      Run console: loads the snapshot, renders <RunConsole>
+├── app/                        Routes only. Pages and layouts are Server Components.
+│   ├── layout.tsx              <html>, theme cookie, skip link (no header: it depends on the session)
+│   ├── (console)/layout.tsx    Header with the signed-in user (GET /auth/me) around the console pages
+│   ├── (console)/page.tsx      New run (/)
+│   ├── (console)/runs/page.tsx Runs list (/runs?page=N), the signed-in user's runs only
+│   ├── (console)/runs/[id]/page.tsx  Run console: loads the snapshot, renders <RunConsole>
+│   ├── login/                  Sign in (/login?next=…): layout.tsx (signed-out header), page.tsx, actions.ts (signIn, signOut)
 │   ├── **/loading.tsx, error.tsx, not-found.tsx
 │   └── api/[...path]/route.ts  Same-origin proxy to FastAPI (the browser only calls /api/*)
 ├── server/
@@ -58,7 +60,7 @@ flowchart LR
 4. **Reducer.** Pure: same input, same output. It replaces only the objects that change, so a text delta creates one new message object and every other turn keeps its identity. A snapshot replaces the state only when it knows more: newer events, or the final numbers of a finished run. An equal snapshot mid-run only refreshes `model_calls`; an older one is ignored.
 5. **View models.** `buildTimeline` (trace order), `describeActivity` (the "now" line) and `budgetItems` (meters) are pure functions with unit tests.
 6. **Components.** `TurnItem` and `ToolCallCard` are memoized; during streaming a delta re-renders only its own turn.
-7. **Commands.** Create, approve/reject and stop are plain `fetch` calls through `/api` (`lib/api.ts`). The open stream delivers their effects, and keyboard focus moves to the result in the trace (the decision record, or the "Run stopped" step). A 409 on an approval reloads the snapshot and explains what happened. No event announces `cancelling`, so a successful Stop applies it locally. A 401 from any of them (or from a snapshot refresh) goes through `lib/login-redirect.ts`: a full page load of `/login?next=<this page>`.
+7. **Commands.** Create, approve/reject and stop are plain `fetch` calls through `/api` (`lib/api.ts`). The open stream delivers their effects, and keyboard focus moves to the result in the trace (the decision record, or the "Run stopped" step). A 409 on an approval reloads the snapshot and explains what happened. No event announces `cancelling`, so a successful Stop applies it locally. A 401 from any of them (or from a snapshot refresh) goes through `lib/login-redirect.ts`: a full page load of `/login?next=<this page>`. The composer passes `next=/?goal=<goal>` instead, so the goal is back in the box after signing in (line breaks become spaces).
 
 **How tool calls find their turn.** The backend emits a turn's `tool.requested` before that turn's `message.completed`, and `tool.requested` has no `message_id`. The reducer keeps requested calls in `pending_tool_call_ids` and attaches them to the message that completes next, which is how the server groups them. `tests/unit/run-events.test.ts` and `timeline.test.ts` replay the real event order and check that the live trace matches the replayed snapshot.
 
@@ -83,11 +85,12 @@ sequenceDiagram
   N->>F: same path, Authorization: Bearer token
 ```
 
-1. **Sign in.** `/login` renders `LoginForm`, a `<form>` bound to the `signIn` Server Action with `useActionState`, so it also works before JavaScript loads. The action checks the fields, calls `POST /auth/login`, stores the token in the `opspilot_session` cookie (`HttpOnly`, `SameSite=Lax`, `Path=/`, `Max-Age` until the backend session expires, `Secure` when the request came over HTTPS) and redirects to `next`. Errors come back as state: a `role="alert"` message that takes keyboard focus. `next` always goes through `safeNextPath` (`lib/auth.ts`), which only accepts a path on this site and never `/login`, so `//evil.com`, `/\evil.com`, `https://…`, `javascript:` and encoded variants fall back to `/`.
-2. **Pages.** `proxy.ts` redirects page requests without the cookie to `/login?next=<path>` before anything renders. It is only an optimistic check: it reads the cookie and makes no backend call. The real check is FastAPI's. Server code turns the cookie into `Authorization: Bearer <token>` (`server/session.ts`): the layout calls `getCurrentUser()` (`GET /auth/me`) for the header, and the loaders send the token. A 401 from a loader becomes `{ kind: "signed-out" }`, and the page redirects to sign in.
-3. **Browser calls.** `/api/*` (`lib/api-proxy.ts`) reads the cookie and sends the token as a bearer header. It drops any `Authorization` header the browser sent. Without a cookie it answers 401 without calling the backend. Health checks stay public.
-4. **Sign out.** The header's user menu posts to the `signOut` Server Action: `POST /auth/logout` revokes the token, then the cookie is deleted and the browser goes to `/login`.
-5. **Stale cookies.** An expired or revoked cookie passes `proxy.ts`, but `/auth/me` and the loaders answer 401. `/login` decides with `getCurrentUser()`, not with the cookie, so it shows the form instead of bouncing back. There is no redirect loop.
+1. **Sign in.** `/login` renders `LoginForm`, a `<form>` bound to the `signIn` Server Action with `useActionState`, so it also works before JavaScript loads. The action checks the fields, calls `POST /auth/login`, stores the token in the `opspilot_session` cookie (`HttpOnly`, `SameSite=Lax`, `Path=/`, `Max-Age` until the backend session expires, `Secure` when the request came over HTTPS) and redirects to `next`. Errors come back as state: a `role="alert"` message that takes keyboard focus. `next` always goes through `safeNextPath` (`lib/auth.ts`), which only accepts a path on this site and never `/login`, so `//evil.com`, `/\evil.com`, `https://…`, `javascript:` and encoded variants fall back to `/`. It also refuses any path the URL parser would change: dot segments (`/.//evil.com` resolves to `//evil.com`) and raw non-ASCII characters (Next writes the redirect into a header, which must be ASCII). The paths the console builds are already in that form.
+2. **Pages.** `proxy.ts` redirects page requests without the cookie to `/login?next=<path>` before anything renders. It is only an optimistic check: it reads the cookie and makes no backend call. The real check is FastAPI's. Server code turns the cookie into `Authorization: Bearer <token>` (`server/session.ts`): the console layout (`app/(console)/layout.tsx`) calls `getCurrentUser()` (`GET /auth/me`) for the header, and the loaders send the token. A 401 from a loader becomes `{ kind: "signed-out" }`, and the page redirects to sign in.
+3. **Browser calls.** `/api/*` (`app/api/[...path]/route.ts` reads the cookie with Next's parser, `lib/api-proxy.ts` forwards) sends the token as a bearer header. There is no browser-side API override: only this proxy can add the token. It drops any `Authorization` header the browser sent. Without a cookie it answers 401 without calling the backend. Health checks stay public.
+4. **Sign out.** The header's user menu posts to the `signOut` Server Action: `POST /auth/logout` revokes the token, then the cookie is deleted and the browser goes to `/login`. The menu (without a name) and its Sign out also appear when `GET /auth/me` fails: then only the cookie is deleted, and the backend session expires on its own.
+5. **Stale cookies.** An expired or revoked cookie passes `proxy.ts`, but `/auth/me` and the loaders answer 401. `/login` decides with `getCurrentUser()`, not with the cookie, so it shows the form instead of bouncing back. There is no redirect loop (`tests/auth.spec.ts` puts a revoked cookie back and checks).
+6. **Why the header is not in the root layout.** Next keeps a layout across client-side navigations, and a page's `redirect()` during one is handled as a client-side navigation too. The header therefore lives in `app/(console)/layout.tsx` and `app/login/layout.tsx`: going to or from `/login` always swaps the layout, so the header is rendered again for the new session state.
 
 Another user's run answers 404, exactly like a run that does not exist, so a run ID reveals nothing.
 
@@ -96,7 +99,8 @@ Another user's run answers 404, exactly like a run that does not exist, so a run
 | Part | Kind | Why |
 | --- | --- | --- |
 | `proxy.ts` | Server (before routing) | Redirects page loads without a session cookie to `/login`. Cookie check only, no backend call. |
-| `app/layout.tsx` | Server | Reads the theme cookie and renders `<html data-theme>`, so the first byte has the right theme without an inline script. Calls `getCurrentUser()` for the header. |
+| `app/layout.tsx` | Server | Reads the theme cookie and renders `<html data-theme>`, so the first byte has the right theme without an inline script. |
+| `app/(console)/layout.tsx`, `app/login/layout.tsx` | Server | The header (`PageShell`) and `<main>`. The console layout calls `getCurrentUser()`; the sign-in layout always shows the signed-out header. |
 | `app/login/actions.ts` | Server (Server Actions) | `signIn` and `signOut`. The token goes from FastAPI into the HttpOnly cookie and never reaches browser JavaScript. |
 | Sign-in form, sign-out button | Client | `useActionState` / `useFormStatus` for pending and error states. Both forms also work without JavaScript. |
 | User menu | Server | A native `popover` panel: the browser handles open, close, Escape and focus order, with no client JavaScript. |
@@ -171,6 +175,10 @@ Playwright's `setup` project (`tests/auth.setup.ts`) signs in Alex and Sam throu
 - The offline `fake` model sends each answer in one chunk, so the streaming caret is only visible with a real model.
 - The `/api` proxy starts every stream with an SSE comment (`: connected`). Node sends headers only with the first body chunk, and a caught-up backend stream stays quiet until its 15-second keepalive.
 - There is no full Content-Security-Policy yet: Next's inline scripts would need a per-request nonce (set in `proxy.ts`). Only `frame-ancestors` is enforced today.
-- The layout waits for `GET /auth/me` before it streams, about one local round trip per page load. The header needs the user, and `cache()` shares the call with the page.
+- The console layout waits for `GET /auth/me` before it streams, about one local round trip per page load. The header needs the user, and `cache()` shares the call with the page.
 - `proxy.ts` cannot tell a stale cookie from a valid one (the token is opaque, and checking it would cost a backend call on every request). Pages catch stale cookies with a 401, and the cookie stays until the next sign-in or sign-out. Its `Max-Age` already ends it with the backend session.
 - A Server Action's `previous` state comes from the client, so `failedSignIn` does not trust it. The real limit on guessing passwords is the backend's login throttle.
+- Moving between console pages reuses the console layout, so if another tab signs in as someone else, this tab's header shows the old name until the next full page load. The data is still the new user's: every request carries the shared cookie.
+- When the session ends, unsent text in the reject form is lost; only the composer's goal comes back after signing in. A goal whose encoded form passes 4096 characters (long non-Latin text) is not restored either.
+- Sessions last 12 hours from sign-in (backend `session_ttl_hours`), with no warning before they end.
+- Errors on `/login` itself fall through to `global-error.tsx`; the console pages have their own `error.tsx` boundaries inside the console layout, so the header stays.

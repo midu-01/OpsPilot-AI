@@ -173,10 +173,12 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * The browser always calls the same-origin /api proxy: it is the only path that turns the
+ * HttpOnly session cookie into a bearer token. Server code calls FastAPI directly.
+ */
 export function getApiBaseUrl(): string {
-  if (typeof window !== "undefined") {
-    return process.env.NEXT_PUBLIC_API_BASE_URL ?? `${window.location.origin}/api`;
-  }
+  if (typeof window !== "undefined") return `${window.location.origin}/api`;
   return process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8000";
 }
 

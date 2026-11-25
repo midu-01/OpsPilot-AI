@@ -9,11 +9,14 @@ import { UserMenu } from "./user-menu";
 
 interface AppHeaderProps {
   theme: ThemePreference;
-  /** From getCurrentUser() in the layout. "unavailable": the backend could not say who is signed in. */
+  /** From getCurrentUser() in the console layout; always signed out on /login. "unavailable": the backend could not say who is signed in. */
   session: CurrentUser;
 }
 
-/** Signed out (the sign-in page): brand and theme only. Otherwise navigation, status, theme and the user menu. */
+/**
+ * Signed out (the sign-in page): brand and theme only. Otherwise navigation, status, theme and
+ * the user menu, which still offers Sign out when the backend could not say who is signed in.
+ */
 export function AppHeader({ theme, session }: AppHeaderProps) {
   const signedOut = session.kind === "signed-out";
   return (
@@ -30,7 +33,7 @@ export function AppHeader({ theme, session }: AppHeaderProps) {
         <div className="ml-auto flex items-center gap-1 sm:gap-2">
           {signedOut ? null : <BackendStatus />}
           <ThemeToggle initial={theme} />
-          {session.kind === "signed-in" ? <UserMenu user={session.user} /> : null}
+          {signedOut ? null : <UserMenu user={session.kind === "signed-in" ? session.user : null} />}
         </div>
       </div>
     </header>

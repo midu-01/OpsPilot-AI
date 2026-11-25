@@ -78,7 +78,8 @@ test("non-JSON backend errors retain their HTTP status and readable explanation"
   });
 });
 
-test("an explicit API base retains its path prefix", async (t) => {
+test("the browser always uses the same-origin /api proxy, even with NEXT_PUBLIC_API_BASE_URL set", async (t) => {
+  // Only the proxy turns the HttpOnly session cookie into a bearer token; a direct call would get 401.
   browserAt(t, "http://localhost:3000");
   process.env.NEXT_PUBLIC_API_BASE_URL = "https://api.example.test/v1";
   let requestedUrl = "";
@@ -88,7 +89,8 @@ test("an explicit API base retains its path prefix", async (t) => {
   });
 
   await createRun("Configured endpoint");
-  assert.equal(requestedUrl, "https://api.example.test/v1/runs");
+  assert.equal(requestedUrl, "http://localhost:3000/api/runs");
+  assert.equal(getStreamUrl("01234567-89ab-4cde-8fab-0123456789ab"), "http://localhost:3000/api/runs/01234567-89ab-4cde-8fab-0123456789ab/stream");
 });
 
 test("explicit request cancellation remains an AbortError", async (t) => {
