@@ -19,6 +19,7 @@ from app.agent.usage import Pricing, record_usage
 from app.models import Approval, Message, ModelCall, Run, ToolCall
 from app.runs.schemas import EventType, ToolError, ToolFailure, ToolResult
 from app.runs.service import append_event
+from app.search.embeddings import get_embedder
 from app.tools import ToolContext
 from app.tools.registry import get_registry
 
@@ -350,7 +351,7 @@ class Execution:
                 result = await self.registry.dispatch(
                     event.tool_name,
                     event.arguments,
-                    ToolContext(session, self.run.reference_time, self.run.business_timezone),
+                    ToolContext(session, self.run.reference_time, self.run.business_timezone, get_embedder()),
                 )
         except Exception as exc:
             if timer.expired():

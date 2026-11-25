@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.contracts import ToolDefinition
 from app.runs.schemas import ToolError, ToolFailure, ToolResult, ToolSuccess
+from app.search.embeddings import Embedder
 
 
 class InvalidToolArguments(ValueError):
@@ -21,6 +22,7 @@ class ToolContext:
     session: AsyncSession
     reference_time: datetime
     timezone: str
+    embedder: Embedder
 
 
 @dataclass(frozen=True)
