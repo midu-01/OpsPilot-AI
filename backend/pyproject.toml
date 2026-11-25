@@ -12,6 +12,9 @@ dependencies = [
     "pydantic-settings>=2.9.1,<3",
     "alembic>=1.16,<2",
     "httpx>=0.28.1,<1",
+    "pgvector>=0.5.1,<0.6",
+    "fastembed>=0.9.1,<0.10",
+    "argon2-cffi>=25.1.0,<26",
 ]
 
 [dependency-groups]
@@ -29,6 +32,10 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.coverage.run]
+# SQLAlchemy's async API runs database calls in greenlets; without this, lines after an await are not counted.
+concurrency = ["greenlet", "thread"]
 
 [tool.ruff]
 target-version = "py312"
