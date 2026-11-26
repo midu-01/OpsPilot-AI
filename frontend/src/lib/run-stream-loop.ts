@@ -1,18 +1,21 @@
-import { ApiError, getRun, getStreamUrl, type RunEvent, type RunSnapshot, type RunStatus } from "./api.ts";
+import { getRun, getStreamUrl, type RunEvent, type RunSnapshot, type RunStatus } from "./api.ts";
 import { isUnauthorizedError } from "./load-errors.ts";
-import { readRunEvents } from "./run-stream.ts";
+import { CLOSE_INVALID_CURSOR, CLOSE_NOT_AUTHENTICATED, readRunSocket, StreamClosedError } from "./run-stream.ts";
 import { isTerminalStatus } from "./status.ts";
 
 /**
  * The live connection for one run, without React:
  *
- *   1. GET /api/runs/{id}/stream?after=<cursor>  (+ Last-Event-ID), parse SSE frames.
+ *   1. Open a WebSocket to /api/runs/{id}/stream?after=<cursor>. The server answers
+ *      "stream.ready", replays the events after the cursor, then sends new ones as they commit.
  *   2. Each event must be cursor + 1. Duplicates are skipped; a gap means we missed
  *      something, so we load a fresh snapshot and reconnect from its cursor.
- *   3. On a disconnect, reload the snapshot, back off (1 s, 2 s, 4 s … 15 s), retry.
- *   4. Stop when the run is finished (terminal event, or 204 "finished and caught up"),
- *      when the caller aborts (component unmount), or on 401: the session ended, so
- *      retrying cannot help and the caller sends the user to sign in.
+ *   3. On a disconnect, or 45 s without a message, reload the snapshot, back off
+ *      (1 s, 2 s, 4 s … 15 s) and reconnect. After a 4422 close (our cursor is ahead of the
+ *      run) that snapshot replaces the page's state.
+ *   4. Stop when the run is finished (the server closes with 1000 after its last event), when
+ *      the caller aborts (component unmount), or when the session ended (a 4401 close, or 401
+ *      from a snapshot): retrying cannot help, and the caller sends the user to sign in.
  *
  * The caller owns state: it receives events and snapshots through callbacks.
  */
@@ -26,15 +29,16 @@ export interface StreamLoopOptions {
   status: RunStatus;
   signal: AbortSignal;
   onEvent: (event: RunEvent) => void;
-  /** `force` is set when the server rejected our cursor (422) and the snapshot must replace state. */
+  /** `force` is set when the server rejected our cursor (4422) and the snapshot must replace state. */
   onSnapshot: (snapshot: RunSnapshot, force: boolean) => void;
   onConnection: (connection: StreamConnection) => void;
-  /** 401 from the stream or a snapshot: the loop has stopped; the caller sends the user to sign in. */
+  /** The session ended: the loop has stopped, and the caller sends the user to sign in. */
   onUnauthorized?: () => void;
   // Injected in tests.
-  fetchStream?: (url: string, init: RequestInit) => Promise<Response>;
+  openSocket?: (url: string) => WebSocket;
   loadSnapshot?: (runId: string, signal: AbortSignal) => Promise<RunSnapshot>;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  idleTimeoutMs?: number;
 }
 
 const MAX_BACKOFF_MS = 15_000;
@@ -57,6 +61,10 @@ class StreamGapError extends Error {
   }
 }
 
+function isClose(error: unknown, code: number): boolean {
+  return error instanceof StreamClosedError && error.code === code;
+}
+
 /** Resolves after `ms`, or as soon as the signal aborts. */
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -72,10 +80,10 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
-  const fetchStream = options.fetchStream ?? ((url: string, init: RequestInit) => fetch(url, init));
+  const openSocket = options.openSocket ?? ((url: string) => new WebSocket(url));
   const loadSnapshot = options.loadSnapshot ?? ((runId: string, signal: AbortSignal) => getRun(runId, { signal }));
   const sleep = options.sleep ?? abortableSleep;
-  const { runId, signal } = options;
+  const { runId, signal, idleTimeoutMs } = options;
   let cursor = options.cursor;
   let status = options.status;
   let failures = 0;
@@ -92,7 +100,7 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
   }
 
   function sessionEnded(error: unknown): boolean {
-    if (!isUnauthorizedError(error)) return false;
+    if (!isUnauthorizedError(error) && !isClose(error, CLOSE_NOT_AUTHENTICATED)) return false;
     options.onUnauthorized?.();
     return true;
   }
@@ -100,37 +108,23 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
   while (!signal.aborted && !isTerminalStatus(status)) {
     try {
       options.onConnection(failures === 0 ? "connecting" : "reconnecting");
-      const response = await fetchStream(getStreamUrl(runId, cursor), {
-        headers: { Accept: "text/event-stream", "Last-Event-ID": String(cursor) },
-        cache: "no-store",
-        signal,
-      });
-      if (response.status === 401) throw new ApiError(401, "Sign in to continue.", "Sign in to continue.");
-      if (response.status === 204) {
-        await reconcile(); // finished and we are caught up: load the final snapshot
-        if (isTerminalStatus(status)) break;
-        throw new Error("The stream ended but the run has not finished.");
+      const socket = openSocket(getStreamUrl(runId, cursor));
+      for await (const message of readRunSocket(socket, { signal, idleTimeoutMs })) {
+        if (message.type === "stream.ready") {
+          options.onConnection("live");
+          continue;
+        }
+        if (message.type === "stream.keepalive") continue;
+        if (message.run_id !== runId) throw new Error("The stream belongs to a different run.");
+        if (message.sequence <= cursor) continue; // already applied (replayed after a reconnect)
+        if (message.sequence !== cursor + 1) throw new StreamGapError(cursor + 1, message.sequence);
+        cursor = message.sequence;
+        status = TERMINAL_EVENTS[message.type] ?? status;
+        options.onEvent(message);
+        failures = 0; // reset only once an event got through, so a bad message keeps backing off
       }
-      if (response.status === 422) {
-        // Our cursor is ahead of the run (for example the database was reset):
-        // take the server's snapshot, then retry through the back-off path.
-        await reconcile(true);
-        throw new Error("The stream cursor was ahead of the run.");
-      }
-      if (!response.ok) throw new Error(`The run stream returned HTTP ${response.status}.`);
-
-      options.onConnection("live");
-      for await (const event of readRunEvents(response)) {
-        if (event.run_id !== runId) throw new Error("The stream belongs to a different run.");
-        if (event.sequence <= cursor) continue; // already applied (replayed after a reconnect)
-        if (event.sequence !== cursor + 1) throw new StreamGapError(cursor + 1, event.sequence);
-        cursor = event.sequence;
-        status = TERMINAL_EVENTS[event.type] ?? status;
-        options.onEvent(event);
-        failures = 0; // reset only once an event got through, so a bad frame keeps backing off
-      }
-      // The server closes the stream after the run finishes. Load the final snapshot
-      // (model calls, exact active time). Any other close is a disconnect.
+      // The server closed with 1000: the run has finished and we have its last event. Load
+      // the final snapshot (model calls, exact active time).
       await reconcile();
       if (!isTerminalStatus(status)) throw new Error("The stream closed before the run finished.");
     } catch (error) {
@@ -143,7 +137,9 @@ export async function runStreamLoop(options: StreamLoopOptions): Promise<void> {
       failures += 1;
       options.onConnection("reconnecting");
       try {
-        await reconcile();
+        // 4422: our cursor is ahead of the run (for example the database was reset), so the
+        // server's snapshot replaces the page's state before we reconnect from its cursor.
+        await reconcile(isClose(error, CLOSE_INVALID_CURSOR));
       } catch (reconcileError) {
         if (signal.aborted || sessionEnded(reconcileError)) return;
         options.onConnection("offline");

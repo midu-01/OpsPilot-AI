@@ -329,8 +329,14 @@ export async function getMe(options?: RequestOptions): Promise<SessionUser> {
   return user;
 }
 
+/**
+ * The run's live stream: a WebSocket on the console's own origin (wss: when the page is on
+ * HTTPS). The browser sends the session cookie with the handshake, and proxy.ts forwards it
+ * to FastAPI as a bearer token. `after` is the last event the page already has.
+ */
 export function getStreamUrl(runId: string, after?: number): string {
   const url = apiUrl(runPath(runId, "/stream"));
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   if (after !== undefined && after > 0) {
     url.searchParams.set("after", after.toString());
   }

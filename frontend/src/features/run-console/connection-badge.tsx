@@ -11,7 +11,7 @@ const CONNECTION: Record<ConnectionState, { label: string; icon: LucideIcon | nu
   history: { label: "Replayed from history", icon: History, className: "text-muted" },
 };
 
-/** The state of the SSE connection, separate from the run's own status. */
+/** The state of the run stream's WebSocket, separate from the run's own status. */
 export function ConnectionBadge({ connection }: { connection: ConnectionState }) {
   const { label, icon: Icon, className, spin } = CONNECTION[connection];
   return (

@@ -20,8 +20,9 @@ export interface RunStream {
 /**
  * Live state for one run: the reducer (lib/run-events.ts) fed by the stream loop
  * (lib/run-stream-loop.ts). The loop starts from the snapshot the server rendered
- * and is aborted when the component unmounts. A 401 (the session ended) sends the
- * browser to sign in and back to this run.
+ * and is aborted when the component unmounts, which closes the WebSocket. When the session
+ * has ended (the stream closes with 4401, or a snapshot answers 401), the browser goes to
+ * sign in and comes back to this run.
  */
 export function useRunStream(initialSnapshot: RunSnapshot): RunStream {
   // Later prop changes are ignored; the page keys the console by run id.

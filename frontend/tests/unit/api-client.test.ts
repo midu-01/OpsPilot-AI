@@ -46,9 +46,16 @@ test("stream replay and browser readiness use the same API prefix", async (t) =>
   });
 
   const runId = "01234567-89ab-4cde-8fab-0123456789ab";
-  assert.equal(getStreamUrl(runId, 12), `http://127.0.0.1:13000/api/runs/${runId}/stream?after=12`);
+  assert.equal(getStreamUrl(runId, 12), `ws://127.0.0.1:13000/api/runs/${runId}/stream?after=12`);
   assert.equal(await checkReadiness(getApiBaseUrl()), true);
   assert.equal(requestedUrl, "http://127.0.0.1:13000/api/health/ready");
+});
+
+test("the stream is a WebSocket on the page's own origin, encrypted when the page is", (t) => {
+  browserAt(t, "https://console.example.test");
+  const runId = "01234567-89ab-4cde-8fab-0123456789ab";
+  assert.equal(getStreamUrl(runId, 3), `wss://console.example.test/api/runs/${runId}/stream?after=3`);
+  assert.equal(getStreamUrl(runId, 0), `wss://console.example.test/api/runs/${runId}/stream`); // nothing applied yet
 });
 
 test("network errors keep an actionable message instead of replacing it with Failed to fetch", async (t) => {
@@ -90,7 +97,7 @@ test("the browser always uses the same-origin /api proxy, even with NEXT_PUBLIC_
 
   await createRun("Configured endpoint");
   assert.equal(requestedUrl, "http://localhost:3000/api/runs");
-  assert.equal(getStreamUrl("01234567-89ab-4cde-8fab-0123456789ab"), "http://localhost:3000/api/runs/01234567-89ab-4cde-8fab-0123456789ab/stream");
+  assert.equal(getStreamUrl("01234567-89ab-4cde-8fab-0123456789ab"), "ws://localhost:3000/api/runs/01234567-89ab-4cde-8fab-0123456789ab/stream");
 });
 
 test("explicit request cancellation remains an AbortError", async (t) => {
