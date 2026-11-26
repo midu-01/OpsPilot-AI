@@ -14,9 +14,11 @@ from app.auth.dependencies import get_current_user, get_sign_in_check
 from app.db import get_session
 from app.main import app
 from app.models import User
-from app.runs.events import KEEPALIVE_FRAME, get_broker, stream_events
+from app.runs.events import SignedOut, get_broker, stream_events
 from app.runs.routes import require_run_owner
-from app.runs.schemas import EventType, RunEvent, RunStatus
+from app.runs.schemas import EventType, RunEvent, RunStatus, StreamKeepalive
+
+type StreamItem = RunEvent | StreamKeepalive
 
 NOW = datetime.now(UTC)
 
@@ -197,17 +199,8 @@ async def test_live_streaming_receives_event_and_keepalive(run_id: uuid4) -> Non
     mock_db = MockDb(run_id=run_id, status=RunStatus.running, next_seq=2, events=events)
     mock_opener = create_mock_app(mock_db)
 
-    from app.runs.events import stream_events
-
-    received: list[str] = []
-
-    async def run_stream():
-        async for chunk in stream_events(mock_opener, run_id, cursor=0, keepalive_timeout=0.05):
-            received.append(chunk)
-            if "run.completed" in chunk:
-                break
-
-    task = asyncio.create_task(run_stream())
+    # The run finishing ends the stream by itself, so collecting it ends too.
+    task = asyncio.create_task(_collect(stream_events(mock_opener, run_id, cursor=0, keepalive_timeout=0.05)))
 
     # Wait for first event (run.queued) and keepalive
     await asyncio.sleep(0.12)
@@ -218,14 +211,13 @@ async def test_live_streaming_receives_event_and_keepalive(run_id: uuid4) -> Non
     mock_db.status = RunStatus.completed
     broker.notify(run_id)
 
-    await asyncio.wait_for(task, timeout=1.0)
+    received = await asyncio.wait_for(task, timeout=1.0)
 
-    # First chunk is event 1
-    assert "id: 1\nevent: run.queued" in received[0]
-    # At least one keepalive comment was received
-    assert any(chunk == ": keepalive\n\n" for chunk in received)
-    # Event 2 was received
-    assert any("id: 2\nevent: run.completed" in chunk for chunk in received)
+    # The first item is event 1, at least one keepalive followed while the run was quiet, and event 2 came last.
+    assert isinstance(received[0], RunEvent) and received[0].type == EventType.run_queued
+    assert any(isinstance(item, StreamKeepalive) for item in received)
+    assert _sequences(received) == [1, 2]
+    assert isinstance(received[-1], RunEvent) and received[-1].type == EventType.run_completed
 
 
 async def test_two_subscribers_and_disconnect_cleanup(run_id: uuid4) -> None:
@@ -238,28 +230,17 @@ async def test_two_subscribers_and_disconnect_cleanup(run_id: uuid4) -> None:
 
     from contextlib import aclosing
 
-    from app.runs.events import stream_events
-
     # Start two independent subscribers
-    sub1_chunks: list[str] = []
-    sub2_chunks: list[str] = []
+    sub1_items: list[StreamItem] = []
+    sub2_items: list[StreamItem] = []
 
-    async def sub1():
+    async def subscribe(received: list[StreamItem]) -> None:
         async with aclosing(stream_events(mock_opener, run_id, cursor=0, keepalive_timeout=0.5)) as gen:
-            async for chunk in gen:
-                sub1_chunks.append(chunk)
-                if "run.completed" in chunk:
-                    break
+            async for item in gen:
+                received.append(item)
 
-    async def sub2():
-        async with aclosing(stream_events(mock_opener, run_id, cursor=0, keepalive_timeout=0.5)) as gen:
-            async for chunk in gen:
-                sub2_chunks.append(chunk)
-                if "run.completed" in chunk:
-                    break
-
-    task1 = asyncio.create_task(sub1())
-    task2 = asyncio.create_task(sub2())
+    task1 = asyncio.create_task(subscribe(sub1_items))
+    task2 = asyncio.create_task(subscribe(sub2_items))
 
     await asyncio.sleep(0.05)
     assert len(broker._subscribers[run_id]) == 2
@@ -279,7 +260,8 @@ async def test_two_subscribers_and_disconnect_cleanup(run_id: uuid4) -> None:
 
     # Sub2 completes normally
     await asyncio.wait_for(task2, timeout=1.0)
-    assert any("id: 2\nevent: run.completed" in chunk for chunk in sub2_chunks)
+    assert _sequences(sub2_items) == [1, 2]
+    assert _sequences(sub1_items) == [1]  # cancelled before event 2 existed
 
     # Verify all subscribers cleaned up
     assert run_id not in broker._subscribers
@@ -296,12 +278,14 @@ async def test_stream_ends_at_the_next_keepalive_once_the_sign_in_is_invalid(run
         return len(checked) < 2  # signed in for the first read, revoked by the next wake-up
 
     stream = stream_events(mock_opener, run_id, 0, keepalive_timeout=0.05, is_authorized=valid_until_checked_twice)
-    chunks = await asyncio.wait_for(_collect(stream), timeout=1.0)
+    received: list[StreamItem] = []
+    with pytest.raises(SignedOut):
+        await asyncio.wait_for(_collect(stream, into=received), timeout=1.0)
 
-    # No new events and no notify: the keepalive wake-up alone re-checked the sign-in and closed the stream.
-    assert len(chunks) == 2
-    assert "id: 1\nevent: run.queued" in chunks[0]
-    assert chunks[1] == KEEPALIVE_FRAME
+    # No new events and no notify: the keepalive wake-up alone re-checked the sign-in and ended the stream.
+    assert len(received) == 2
+    assert isinstance(received[0], RunEvent) and received[0].sequence == 1
+    assert isinstance(received[1], StreamKeepalive)
     assert len(checked) == 2 and all(session is not None for session in checked)
     assert run_id not in get_broker()._subscribers
 
@@ -314,8 +298,20 @@ async def test_stream_sends_nothing_when_the_sign_in_is_already_invalid(run_id: 
         return False
 
     stream = stream_events(mock_opener, run_id, 0, keepalive_timeout=0.05, is_authorized=signed_out)
-    assert await asyncio.wait_for(_collect(stream), timeout=1.0) == []
+    received: list[StreamItem] = []
+    with pytest.raises(SignedOut):
+        await asyncio.wait_for(_collect(stream, into=received), timeout=1.0)
+    assert received == []
+    assert run_id not in get_broker()._subscribers
 
 
-async def _collect(stream: AsyncIterator[str]) -> list[str]:
-    return [chunk async for chunk in stream]
+async def _collect(stream: AsyncIterator[StreamItem], into: list[StreamItem] | None = None) -> list[StreamItem]:
+    """Every item until the stream ends; `into` keeps what arrived when it ends with an exception."""
+    received = [] if into is None else into
+    async for item in stream:
+        received.append(item)
+    return received
+
+
+def _sequences(items: list[StreamItem]) -> list[int]:
+    return [item.sequence for item in items if isinstance(item, RunEvent)]

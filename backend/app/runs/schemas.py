@@ -159,6 +159,12 @@ class RunEvent(BaseModel):
         return f"id: {self.sequence}\nevent: {self.type.value}\ndata: {self.model_dump_json()}\n\n"
 
 
+class StreamKeepalive(BaseModel):
+    """Sent when a run has been quiet for a while: the connection is alive and the sign-in was checked again."""
+
+    type: Literal["stream.keepalive"] = "stream.keepalive"
+
+
 class ModelAttemptSnapshot(BaseModel):
     id: UUID
     model: str

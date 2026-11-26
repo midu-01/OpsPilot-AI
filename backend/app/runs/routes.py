@@ -1,7 +1,7 @@
 """Create queued runs and read their persisted traces, for the signed-in owner only."""
 
-from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager
 from typing import Annotated
 from uuid import UUID
 
@@ -14,7 +14,15 @@ from app.auth.dependencies import CurrentUser, StillSignedIn, get_current_user
 from app.db import get_session, get_session_factory
 from app.models import Run
 from app.runs import decisions, events, service
-from app.runs.schemas import ApprovalAction, PaginatedRuns, RunCreate, RunSnapshot, RunSummary
+from app.runs.schemas import (
+    ApprovalAction,
+    PaginatedRuns,
+    RunCreate,
+    RunEvent,
+    RunSnapshot,
+    RunSummary,
+    StreamKeepalive,
+)
 
 # Router-level, so every /runs route needs a signed-in user, including any route added later.
 # FastAPI runs a dependency once per request, so routes that also ask for CurrentUser get the same user.
@@ -83,6 +91,17 @@ async def require_run_owner(run_id: UUID, user: CurrentUser, session: Session) -
 
 
 OWNER_ONLY = [Depends(require_run_owner)]
+SSE_KEEPALIVE = ": keepalive\n\n"
+
+
+async def sse_frames(items: AsyncGenerator[RunEvent | StreamKeepalive, None]) -> AsyncIterator[str]:
+    """Frame the stream's items as SSE. A sign-out ends the stream the same way a finished run does."""
+    async with aclosing(items) as stream:
+        try:
+            async for item in stream:
+                yield item.to_sse() if isinstance(item, RunEvent) else SSE_KEEPALIVE
+        except events.SignedOut:
+            return
 
 
 @router.post("", status_code=202)
@@ -145,7 +164,7 @@ async def stream_run(
 
     return StreamingResponse(
         # A sign-out ends the open stream too: it re-checks the token on every wake-up (at least every 15 s).
-        events.stream_events(opener, run_id, cursor, is_authorized=still_signed_in),
+        sse_frames(events.stream_events(opener, run_id, cursor, is_authorized=still_signed_in)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

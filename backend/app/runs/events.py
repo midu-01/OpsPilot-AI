@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import defaultdict
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from uuid import UUID
 
@@ -12,10 +12,14 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Run, RunEventRecord
-from app.runs.schemas import EventType, RunEvent, RunStatus
+from app.runs.schemas import EventType, RunEvent, RunStatus, StreamKeepalive
 
-KEEPALIVE_FRAME = ": keepalive\n\n"
+KEEPALIVE_SECONDS = 15.0
 TERMINAL_STATUSES = {RunStatus.completed, RunStatus.failed, RunStatus.cancelled}
+
+
+class SignedOut(Exception):
+    """The sign-in behind a stream was revoked or has expired: the stream stops, and the client must sign in again."""
 
 
 class EventBroker:
@@ -120,17 +124,18 @@ async def stream_events(
     run_id: UUID,
     cursor: int,
     *,
-    keepalive_timeout: float = 15.0,
+    keepalive_timeout: float = KEEPALIVE_SECONDS,
     is_authorized: Callable[[AsyncSession], Awaitable[bool]] | None = None,
-) -> AsyncIterator[str]:
-    """Yield incremental SSE frames for run_id strictly after cursor.
+) -> AsyncGenerator[RunEvent | StreamKeepalive, None]:
+    """Yield run_id's committed events after cursor in sequence order, then follow the run live.
 
-    Reads bounded batches from PostgreSQL. Never executes or resumes the agent.
-    Sends keepalive comments during quiet periods. Closes when the run reaches
-    a terminal status and all events up to the terminal sequence have been delivered.
+    The caller decides how each item goes over the wire, so this works for any transport. It reads bounded
+    batches from PostgreSQL and never executes or resumes the agent. After keepalive_timeout seconds without
+    a new event it yields a StreamKeepalive. It returns once the run has finished and its last event was yielded.
 
     is_authorized is awaited with each fresh database session, i.e. before every batch and after every
-    keepalive wait, so a stream ends within one keepalive interval once its sign-in is revoked or expires.
+    keepalive wait. When it answers False this raises SignedOut, so a stream ends within one keepalive
+    interval once its sign-in is revoked or expires.
     """
     broker = get_broker()
     sub_event = await broker.subscribe(run_id)
@@ -139,7 +144,7 @@ async def stream_events(
         while True:
             async with session_opener() as session:
                 if is_authorized is not None and not await is_authorized(session):
-                    break
+                    raise SignedOut
                 events = await read_events(session, run_id, after=current_cursor, limit=100)
                 stream_info = await get_run_stream_info(session, run_id)
 
@@ -149,7 +154,7 @@ async def stream_events(
 
             if events:
                 for event in events:
-                    yield event.to_sse()
+                    yield event
                     current_cursor = event.sequence
                 if len(events) >= 100:
                     continue
@@ -163,6 +168,6 @@ async def stream_events(
                 await asyncio.wait_for(sub_event.wait(), timeout=keepalive_timeout)
                 sub_event.clear()
             except TimeoutError:
-                yield KEEPALIVE_FRAME
+                yield StreamKeepalive()
     finally:
         await broker.unsubscribe(run_id, sub_event)
