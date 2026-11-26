@@ -1,63 +1,74 @@
-"""Unit tests for the SSE streaming endpoint contracts, cursor validation, and framing."""
+"""Unit tests for the run stream: the WebSocket route's checks, messages and close codes, and the subscription loop.
+
+The database is mocked. Sign-in, ownership and live delivery on a real server are covered by integration tests.
+"""
 
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from uuid import uuid4
+from typing import Any
+from unittest.mock import AsyncMock
+from uuid import UUID, uuid4
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from fastapi import WebSocketDisconnect
+from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import get_current_user, get_sign_in_check
+from app.auth.dependencies import get_user_lookup
 from app.db import get_session
 from app.main import app
-from app.models import User
+from app.models import Run, RunEventRecord, User
 from app.runs.events import SignedOut, get_broker, stream_events
-from app.runs.routes import require_run_owner
 from app.runs.schemas import EventType, RunEvent, RunStatus, StreamKeepalive
 
 type StreamItem = RunEvent | StreamKeepalive
 
 NOW = datetime.now(UTC)
+OWNER = User(id=uuid4(), email="alex@opspilot.test", display_name="Alex Rivera", password_hash="unused")
+READY = {"type": "stream.ready"}
 
 
 class MockDb:
-    def __init__(self, run_id: uuid4, status: RunStatus, next_seq: int, events: list[RunEvent] | None = None) -> None:
+    def __init__(
+        self,
+        run_id: UUID,
+        status: RunStatus,
+        next_seq: int,
+        events: list[RunEvent] | None = None,
+        owner_id: UUID | None = OWNER.id,
+    ) -> None:
         self.run_id = run_id
         self.status = status
         self.next_seq = next_seq
         self.events = events or []
+        self.owner_id = owner_id
 
 
 @pytest.fixture
-def run_id() -> uuid4:
+def run_id() -> UUID:
     return uuid4()
 
 
-def create_mock_app(mock_db: MockDb):
+def create_mock_app(mock_db: MockDb | None):
+    """Serve the run (or no run, for None) and its events from memory instead of PostgreSQL."""
+
     @asynccontextmanager
     async def mock_session() -> AsyncIterator[AsyncSession]:
-        from unittest.mock import AsyncMock
-
         sess = AsyncMock(spec=AsyncSession)
 
         async def mock_scalar(query, *args, **kwargs):
-            query_str = str(query)
-            if "FROM runs" in query_str:
-                from app.models import Run
-
-                return Run(
-                    id=mock_db.run_id,
-                    status=mock_db.status.value,
-                    next_event_sequence=mock_db.next_seq,
-                )
-            return None
+            if mock_db is None or "FROM runs" not in str(query):
+                return None
+            return Run(
+                id=mock_db.run_id,
+                user_id=mock_db.owner_id,
+                status=mock_db.status.value,
+                next_event_sequence=mock_db.next_seq,
+            )
 
         async def mock_scalars(query, *args, **kwargs):
-            from app.models import RunEventRecord
-
             params = query.compile().params
             after_seq = params.get("sequence_1", 0)
             return [
@@ -69,7 +80,7 @@ def create_mock_app(mock_db: MockDb):
                     payload=e.payload,
                     schema_version=1,
                 )
-                for e in mock_db.events
+                for e in (mock_db.events if mock_db else [])
                 if e.sequence > after_seq
             ]
 
@@ -81,114 +92,134 @@ def create_mock_app(mock_db: MockDb):
     return mock_session
 
 
-async def always_signed_in(session: AsyncSession) -> bool:
-    return True
+def sign_in_as(user: User | None) -> None:
+    """Stand in for the bearer-token lookup: every check, now and at each wake-up, finds `user`."""
+
+    async def find_user(session: AsyncSession) -> User | None:
+        return user
+
+    app.dependency_overrides[get_user_lookup] = lambda: find_user
 
 
 @pytest.fixture(autouse=True)
 def cleanup_overrides():
-    """These tests mock the database, so stand in for sign-in and ownership (both covered by integration tests)."""
-    signed_in = User(id=uuid4(), email="alex@opspilot.test", display_name="Alex Rivera", password_hash="unused")
-    app.dependency_overrides[get_current_user] = lambda: signed_in
-    app.dependency_overrides[require_run_owner] = lambda: None
-    app.dependency_overrides[get_sign_in_check] = lambda: always_signed_in
+    sign_in_as(OWNER)
     yield
-    for dependency in (get_session, get_current_user, require_run_owner, get_sign_in_check):
+    for dependency in (get_session, get_user_lookup):
         app.dependency_overrides.pop(dependency, None)
 
 
-async def test_stream_unknown_run_returns_404() -> None:
-    @asynccontextmanager
-    async def mock_session() -> AsyncIterator[AsyncSession]:
-        from unittest.mock import AsyncMock
+def receive_until_closed(path: str) -> tuple[list[dict[str, Any]], WebSocketDisconnect]:
+    """Every message the server sends on `path`, and how it closed the socket."""
+    messages: list[dict[str, Any]] = []
+    with TestClient(app).websocket_connect(path) as websocket, pytest.raises(WebSocketDisconnect) as closed:
+        while True:
+            messages.append(websocket.receive_json())
+    return messages, closed.value
 
-        sess = AsyncMock(spec=AsyncSession)
-        sess.scalar.return_value = None
-        yield sess
 
-    app.dependency_overrides[get_session] = mock_session
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        res = await client.get(f"/runs/{uuid4()}/stream")
-        assert res.status_code == 404
-        assert res.json()["detail"] == "Run not found"
+def queued_event(run_id: UUID) -> RunEvent:
+    return RunEvent(run_id=run_id, sequence=1, type=EventType.run_queued, occurred_at=NOW)
+
+
+def test_a_caller_without_a_valid_sign_in_is_closed_with_4401(run_id: UUID) -> None:
+    create_mock_app(MockDb(run_id=run_id, status=RunStatus.running, next_seq=2, events=[queued_event(run_id)]))
+    sign_in_as(None)  # no token, or one that is unknown, expired or revoked
+
+    messages, closed = receive_until_closed(f"/runs/{run_id}/stream")
+
+    assert messages == []  # not even "ready": nothing about the run leaks
+    assert (closed.code, closed.reason) == (4401, "Not authenticated")
+
+
+@pytest.mark.parametrize("owner_id", [uuid4(), None], ids=["another user's run", "a run without an owner"])
+def test_a_run_the_caller_does_not_own_is_closed_with_4404(run_id: UUID, owner_id: UUID | None) -> None:
+    create_mock_app(MockDb(run_id=run_id, status=RunStatus.running, next_seq=2, owner_id=owner_id))
+    messages, closed = receive_until_closed(f"/runs/{run_id}/stream")
+    assert messages == []
+    assert (closed.code, closed.reason) == (4404, "Run not found")
+
+
+def test_an_unknown_run_is_closed_with_4404() -> None:
+    create_mock_app(None)
+    messages, closed = receive_until_closed(f"/runs/{uuid4()}/stream")
+    assert messages == []
+    assert (closed.code, closed.reason) == (4404, "Run not found")
 
 
 @pytest.mark.parametrize(
-    ("params", "headers", "error_msg"),
+    ("after", "reason"),
     [
-        ({"after": "invalid"}, {}, "Invalid event cursor"),
-        ({"after": "-1"}, {}, "Cursor must be non-negative"),
-        ({"after": "1.5"}, {}, "Invalid event cursor"),
-        ({}, {"Last-Event-ID": "invalid"}, "Invalid event cursor"),
-        ({}, {"Last-Event-ID": "-5"}, "Cursor must be non-negative"),
+        ("invalid", "Invalid event cursor; expected an integer"),
+        ("1.5", "Invalid event cursor; expected an integer"),
+        ("-1", "Cursor must be non-negative"),
+        ("5", "Cursor is ahead of the run's latest sequence"),  # the run's latest sequence is 3
     ],
 )
-async def test_stream_malformed_cursor_returns_422(params: dict, headers: dict, error_msg: str) -> None:
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        res = await client.get(f"/runs/{uuid4()}/stream", params=params, headers=headers)
-        assert res.status_code == 422
-        assert error_msg in res.json()["detail"]
+def test_a_malformed_or_future_cursor_is_closed_with_4422(run_id: UUID, after: str, reason: str) -> None:
+    create_mock_app(MockDb(run_id=run_id, status=RunStatus.running, next_seq=4))
+    messages, closed = receive_until_closed(f"/runs/{run_id}/stream?after={after}")
+    assert messages == []
+    assert (closed.code, closed.reason) == (4422, reason)
 
 
-async def test_stream_future_cursor_returns_422(run_id: uuid4) -> None:
-    # Run has latest sequence 3 (next_event_sequence=4)
-    mock_db = MockDb(run_id=run_id, status=RunStatus.running, next_seq=4)
-    create_mock_app(mock_db)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        res = await client.get(f"/runs/{run_id}/stream?after=5")
-        assert res.status_code == 422
-        assert "Cursor is ahead of the run's latest sequence" in res.json()["detail"]
+def test_a_finished_run_the_client_already_has_closes_with_1000_at_once(run_id: UUID) -> None:
+    create_mock_app(MockDb(run_id=run_id, status=RunStatus.completed, next_seq=6))
+    messages, closed = receive_until_closed(f"/runs/{run_id}/stream?after=5")
+    assert messages == []  # nothing to stream, so no "ready" either
+    assert (closed.code, closed.reason) == (1000, "Run finished")
 
 
-async def test_terminal_run_already_consumed_returns_204(run_id: uuid4) -> None:
-    # Terminal run with latest sequence 5, client connects with after=5
-    mock_db = MockDb(run_id=run_id, status=RunStatus.completed, next_seq=6)
-    create_mock_app(mock_db)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        res = await client.get(f"/runs/{run_id}/stream?after=5")
-        assert res.status_code == 204
-
-
-async def test_terminal_run_with_unconsumed_events_drains_and_closes(run_id: uuid4) -> None:
+def test_a_finished_run_replays_the_events_after_the_cursor_then_closes_with_1000(run_id: UUID) -> None:
     events = [
-        RunEvent(run_id=run_id, sequence=1, type=EventType.run_queued, occurred_at=NOW),
+        queued_event(run_id),
         RunEvent(run_id=run_id, sequence=2, type=EventType.run_started, occurred_at=NOW),
-        RunEvent(run_id=run_id, sequence=3, type=EventType.run_completed, occurred_at=NOW),
+        RunEvent(run_id=run_id, sequence=3, type=EventType.run_completed, occurred_at=NOW, payload={"ok": True}),
     ]
-    mock_db = MockDb(run_id=run_id, status=RunStatus.completed, next_seq=4, events=events)
-    create_mock_app(mock_db)
+    create_mock_app(MockDb(run_id=run_id, status=RunStatus.completed, next_seq=4, events=events))
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        res = await client.get(f"/runs/{run_id}/stream?after=0")
-        assert res.status_code == 200
-        assert "text/event-stream" in res.headers["content-type"]
-        assert res.headers["cache-control"] == "no-cache, no-transform"
-        assert res.headers["x-accel-buffering"] == "no"
+    messages, closed = receive_until_closed(f"/runs/{run_id}/stream?after=1")
 
-        body = res.text
-        assert "id: 1\nevent: run.queued" in body
-        assert "id: 2\nevent: run.started" in body
-        assert "id: 3\nevent: run.completed" in body
+    assert messages[0] == READY
+    replayed = [RunEvent.model_validate(message) for message in messages[1:]]
+    assert replayed == events[1:]  # one JSON text frame per event, in sequence order
+    assert (closed.code, closed.reason) == (1000, "Run finished")
 
 
-async def test_last_event_id_takes_precedence_over_after(run_id: uuid4) -> None:
-    events = [
-        RunEvent(run_id=run_id, sequence=1, type=EventType.run_queued, occurred_at=NOW),
-        RunEvent(run_id=run_id, sequence=2, type=EventType.run_started, occurred_at=NOW),
-    ]
-    # latest sequence is 2. If after=0 but Last-Event-ID=2, then client already has event 2.
-    # Terminal run: should return 204!
-    mock_db = MockDb(run_id=run_id, status=RunStatus.completed, next_seq=3, events=events)
-    create_mock_app(mock_db)
+def test_the_stream_closes_with_1008_when_the_client_sends_a_message(run_id: UUID) -> None:
+    create_mock_app(MockDb(run_id=run_id, status=RunStatus.running, next_seq=2, events=[queued_event(run_id)]))
+    with TestClient(app).websocket_connect(f"/runs/{run_id}/stream") as websocket:
+        assert websocket.receive_json() == READY
+        assert websocket.receive_json()["sequence"] == 1
+        websocket.send_text("approve, please")  # commands are HTTP POSTs; this socket only sends
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_json()
+    assert (closed.value.code, closed.value.reason) == (1008, "This stream does not accept messages")
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        res = await client.get(
-            f"/runs/{run_id}/stream?after=0",
-            headers={"Last-Event-ID": "2"},
-        )
-        assert res.status_code == 204
+
+def test_leaving_the_stream_releases_its_subscription(run_id: UUID) -> None:
+    create_mock_app(MockDb(run_id=run_id, status=RunStatus.running, next_seq=2, events=[queued_event(run_id)]))
+    with TestClient(app).websocket_connect(f"/runs/{run_id}/stream") as websocket:
+        assert websocket.receive_json() == READY
+        assert websocket.receive_json()["sequence"] == 1
+        assert run_id in get_broker()._subscribers  # waiting for the run's next commit
+    assert run_id not in get_broker()._subscribers
+
+
+def test_an_unexpected_error_closes_with_1011_and_is_logged(run_id: UUID, caplog: pytest.LogCaptureFixture) -> None:
+    @asynccontextmanager
+    async def unavailable_database() -> AsyncIterator[AsyncSession]:
+        sess = AsyncMock(spec=AsyncSession)
+        sess.scalar.side_effect = OSError("connection refused")
+        yield sess
+
+    app.dependency_overrides[get_session] = unavailable_database
+
+    messages, closed = receive_until_closed(f"/runs/{run_id}/stream")
+
+    assert messages == []
+    assert (closed.code, closed.reason) == (1011, "Internal error")  # the details stay in the server log
+    assert f"The event stream of run {run_id} failed" in caplog.text
 
 
 async def test_live_streaming_receives_event_and_keepalive(run_id: uuid4) -> None:

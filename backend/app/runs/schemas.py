@@ -145,7 +145,7 @@ class EventType(StrEnum):
 
 
 class RunEvent(BaseModel):
-    """Persisted event envelope for SSE delivery and replay."""
+    """Persisted event envelope: one message on the run stream, and part of every snapshot's history."""
 
     schema_version: Literal[1] = 1
     run_id: UUID
@@ -154,9 +154,13 @@ class RunEvent(BaseModel):
     occurred_at: AwareDatetime
     payload: dict[str, JsonValue] = Field(default_factory=dict)
 
-    def to_sse(self) -> str:
-        """Format event into a standard SSE frame with id, event, and data."""
-        return f"id: {self.sequence}\nevent: {self.type.value}\ndata: {self.model_dump_json()}\n\n"
+
+# The run stream's two control messages. Their types start with "stream." so that "type" alone tells every
+# message apart: a RunEvent's type is always an EventType.
+class StreamReady(BaseModel):
+    """The first message on a run stream: the checks passed, and events after the client's cursor follow."""
+
+    type: Literal["stream.ready"] = "stream.ready"
 
 
 class StreamKeepalive(BaseModel):

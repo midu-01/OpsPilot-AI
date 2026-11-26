@@ -1,12 +1,13 @@
-"""Unit tests for the versioned run event envelope and SSE formatting."""
+"""Unit tests for the versioned run event envelope and the run stream's messages."""
 
+import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
-from app.runs.schemas import EventType, RunEvent
+from app.runs.schemas import EventType, RunEvent, StreamKeepalive, StreamReady
 
 NOW = datetime.now(UTC)
 
@@ -56,7 +57,7 @@ def test_unaware_datetime_rejected() -> None:
         RunEvent.model_validate({"run_id": uuid4(), "sequence": 1, "type": EventType.run_queued, "occurred_at": naive})
 
 
-def test_event_sse_formatting_and_roundtrip() -> None:
+def test_an_event_message_is_its_json_and_round_trips() -> None:
     run_id = uuid4()
     event = RunEvent(
         run_id=run_id,
@@ -65,22 +66,25 @@ def test_event_sse_formatting_and_roundtrip() -> None:
         occurred_at=datetime(2026, 11, 22, 12, 0, 0, tzinfo=UTC),
         payload={"tool": "query_orders", "result": {"orders": []}},
     )
-    sse = event.to_sse()
-    assert sse.startswith("id: 12\nevent: tool.completed\ndata: {")
-    assert sse.endswith("}\n\n")
+    message = json.loads(event.model_dump_json())
 
-    lines = sse.strip().split("\n")
-    assert lines[0] == "id: 12"
-    assert lines[1] == "event: tool.completed"
-    assert lines[2].startswith("data: ")
+    # One WebSocket text frame: the console tells messages apart by "type" alone.
+    assert message == {
+        "schema_version": 1,
+        "run_id": str(run_id),
+        "sequence": 12,
+        "type": "tool.completed",
+        "occurred_at": "2026-11-22T12:00:00Z",
+        "payload": {"tool": "query_orders", "result": {"orders": []}},
+    }
+    assert RunEvent.model_validate_json(event.model_dump_json()) == event
 
-    data_json = lines[2][len("data: ") :]
-    parsed = RunEvent.model_validate_json(data_json)
-    assert parsed.run_id == run_id
-    assert parsed.sequence == 12
-    assert parsed.type == EventType.tool_completed
-    assert parsed.occurred_at == event.occurred_at
-    assert parsed.payload == event.payload
+
+def test_control_messages_cannot_be_mistaken_for_events() -> None:
+    assert json.loads(StreamReady().model_dump_json()) == {"type": "stream.ready"}
+    assert json.loads(StreamKeepalive().model_dump_json()) == {"type": "stream.keepalive"}
+    event_types = {event_type.value for event_type in EventType}
+    assert {StreamReady().type, StreamKeepalive().type}.isdisjoint(event_types)
 
 
 async def test_event_broker_subscribe_notify_unsubscribe() -> None:

@@ -1,81 +1,24 @@
 """Create queued runs and read their persisted traces, for the signed-in owner only."""
 
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.dependencies import CurrentUser, StillSignedIn, get_current_user
-from app.db import get_session, get_session_factory
+from app.auth.dependencies import CurrentUser, get_current_user
+from app.db import get_session
 from app.models import Run
-from app.runs import decisions, events, service
-from app.runs.schemas import (
-    ApprovalAction,
-    PaginatedRuns,
-    RunCreate,
-    RunEvent,
-    RunSnapshot,
-    RunSummary,
-    StreamKeepalive,
-)
+from app.runs import decisions, service
+from app.runs.schemas import ApprovalAction, PaginatedRuns, RunCreate, RunSnapshot, RunSummary
 
-# Router-level, so every /runs route needs a signed-in user, including any route added later.
+# Router-level, so every HTTP route under /runs needs a signed-in user, including any route added later.
 # FastAPI runs a dependency once per request, so routes that also ask for CurrentUser get the same user.
+# The live stream is a WebSocket on its own router (app/runs/websocket.py): it makes the same checks itself,
+# after accepting, because a refused handshake cannot tell the browser why.
 router = APIRouter(prefix="/runs", tags=["runs"], dependencies=[Depends(get_current_user)])
 type Session = Annotated[AsyncSession, Depends(get_session)]
-
-
-def parse_cursor(last_event_id: str | None, after: str | None) -> int:
-    raw_cursor: str | None = None
-    if last_event_id is not None:
-        raw_cursor = last_event_id
-    elif after is not None:
-        raw_cursor = after
-
-    if raw_cursor is None:
-        return 0
-
-    try:
-        cursor = int(raw_cursor)
-    except (ValueError, TypeError):
-        raise HTTPException(status_code=422, detail="Invalid event cursor; expected an integer") from None
-
-    if cursor < 0:
-        raise HTTPException(status_code=422, detail="Cursor must be non-negative")
-
-    return cursor
-
-
-def make_session_opener(request: Request) -> Callable[[], AbstractAsyncContextManager[AsyncSession]]:
-    @asynccontextmanager
-    async def open_session() -> AsyncIterator[AsyncSession]:
-        override_sess = request.app.dependency_overrides.get(get_session)
-        if override_sess:
-            gen = override_sess()
-            if hasattr(gen, "__aenter__"):
-                async with gen as session:
-                    yield session
-            elif hasattr(gen, "__anext__"):
-                session = await anext(gen)
-                try:
-                    yield session
-                finally:
-                    await gen.aclose()
-            else:
-                yield override_sess()
-            return
-
-        override_factory = request.app.dependency_overrides.get(get_session_factory)
-        factory = override_factory() if override_factory else get_session_factory()
-        async with factory() as session:
-            yield session
-
-    return open_session
 
 
 async def require_run_owner(run_id: UUID, user: CurrentUser, session: Session) -> None:
@@ -91,17 +34,6 @@ async def require_run_owner(run_id: UUID, user: CurrentUser, session: Session) -
 
 
 OWNER_ONLY = [Depends(require_run_owner)]
-SSE_KEEPALIVE = ": keepalive\n\n"
-
-
-async def sse_frames(items: AsyncGenerator[RunEvent | StreamKeepalive, None]) -> AsyncIterator[str]:
-    """Frame the stream's items as SSE. A sign-out ends the stream the same way a finished run does."""
-    async with aclosing(items) as stream:
-        try:
-            async for item in stream:
-                yield item.to_sse() if isinstance(item, RunEvent) else SSE_KEEPALIVE
-        except events.SignedOut:
-            return
 
 
 @router.post("", status_code=202)
@@ -135,40 +67,3 @@ async def decide_approval(run_id: UUID, body: ApprovalAction, session: Session) 
 @router.post("/{run_id}/stop", dependencies=OWNER_ONLY)
 async def stop_run(run_id: UUID, session: Session) -> RunSummary:
     return await decisions.stop_run(session, run_id)
-
-
-@router.get("/{run_id}/stream", dependencies=OWNER_ONLY)
-async def stream_run(
-    run_id: UUID,
-    request: Request,
-    still_signed_in: StillSignedIn,
-    after: Annotated[str | None, Query(description="Sequence number to replay events after")] = None,
-    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
-) -> Response:
-    cursor = parse_cursor(last_event_id, after)
-    opener = make_session_opener(request)
-
-    async with opener() as session:
-        stream_info = await events.get_run_stream_info(session, run_id)
-
-    if stream_info is None:
-        raise HTTPException(status_code=404, detail="Run not found")
-
-    status, latest_seq = stream_info
-
-    if cursor > latest_seq:
-        raise HTTPException(status_code=422, detail="Cursor is ahead of the run's latest sequence")
-
-    if status in events.TERMINAL_STATUSES and cursor >= latest_seq:
-        return Response(status_code=204)
-
-    return StreamingResponse(
-        # A sign-out ends the open stream too: it re-checks the token on every wake-up (at least every 15 s).
-        sse_frames(events.stream_events(opener, run_id, cursor, is_authorized=still_signed_in)),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )

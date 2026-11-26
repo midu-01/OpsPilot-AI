@@ -1,6 +1,8 @@
 """Give each integration test a freshly migrated, disposable PostgreSQL database with the policy index built."""
 
+import asyncio
 import os
+import socket
 import sys
 from asyncio import create_subprocess_exec
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -9,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import uvicorn
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -99,5 +102,55 @@ async def api_client(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterato
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             yield client
     finally:
+        app.dependency_overrides.pop(get_session, None)
+        app.dependency_overrides.pop(get_session_factory, None)
+
+
+def get_ephemeral_port() -> int:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+    except PermissionError as exc:
+        pytest.skip(f"Socket bind is restricted by environment sandbox: {exc}")
+
+
+@pytest.fixture
+async def server(sessions: async_sessionmaker[AsyncSession]) -> AsyncIterator[str]:
+    """Run the app on a real Uvicorn server on a loopback port, using this test's database. Yields its base URL.
+
+    The ASGI test client cannot open WebSockets, so the run stream is tested here. lifespan="off": the tests drive
+    the agent themselves, so the app's worker does not start.
+    """
+    port = get_ephemeral_port()
+
+    app.dependency_overrides[get_session_factory] = lambda: sessions
+
+    async def isolated_session() -> AsyncIterator[AsyncSession]:
+        async with sessions() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = isolated_session
+
+    config = uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
+    srv = uvicorn.Server(config)
+    server_task = asyncio.create_task(srv.serve())
+
+    # Wait for server to bind
+    for _ in range(50):
+        if srv.started:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        server_task.cancel()
+        raise RuntimeError("Uvicorn failed to start")
+
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        srv.should_exit = True
+        await asyncio.gather(server_task, return_exceptions=True)
         app.dependency_overrides.pop(get_session, None)
         app.dependency_overrides.pop(get_session_factory, None)

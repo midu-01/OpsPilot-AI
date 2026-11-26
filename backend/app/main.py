@@ -18,6 +18,7 @@ from app.config import settings
 from app.db import async_session_factory, engine
 from app.runs.routes import router as runs_router
 from app.runs.schemas import HealthResponse
+from app.runs.websocket import router as run_stream_router
 
 logger = logging.getLogger("opspilot")
 READINESS_TIMEOUT_SECONDS = 3.0
@@ -47,6 +48,7 @@ app.add_middleware(
 )
 app.include_router(auth_router)
 app.include_router(runs_router)
+app.include_router(run_stream_router)
 
 # FastAPI's default 422 body repeats each invalid value under "input" (and limits under "ctx"),
 # which would echo a rejected password from POST /auth/login. Say which field failed and why, never what was sent.

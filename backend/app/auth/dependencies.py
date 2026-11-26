@@ -15,7 +15,7 @@ from app.db import get_session
 from app.models import User
 
 type DbSession = Annotated[AsyncSession, Depends(get_session)]
-type SignInCheck = Callable[[AsyncSession], Awaitable[bool]]
+type UserLookup = Callable[[AsyncSession], Awaitable[User | None]]
 
 # auto_error=False lets a missing header reach our code, so every kind of failure gets the same 401 below.
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -56,13 +56,18 @@ async def get_current_user(token: BearerToken, session: DbSession) -> User:
 type CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-async def get_sign_in_check(token: BearerToken) -> SignInCheck:
-    """Let a long-lived response (the SSE stream) ask again later whether this sign-in is still valid."""
+async def get_user_lookup(credentials: BearerCredentials) -> UserLookup:
+    """For the run stream, which outlives its handshake: find the caller's user now, and again at every wake-up.
 
-    async def still_signed_in(session: AsyncSession) -> bool:
-        return await service.user_for_token(session, token) is not None
+    It never raises. The WebSocket route accepts first and answers a missing, expired or revoked sign-in with a
+    close code, because a browser cannot read the HTTP status of a refused handshake.
+    """
+    token = None if credentials is None else credentials.credentials
 
-    return still_signed_in
+    async def find_user(session: AsyncSession) -> User | None:
+        return None if token is None else await service.user_for_token(session, token)
+
+    return find_user
 
 
-type StillSignedIn = Annotated[SignInCheck, Depends(get_sign_in_check)]
+type CallerLookup = Annotated[UserLookup, Depends(get_user_lookup)]

@@ -1,4 +1,7 @@
-"""Every /runs endpoint needs a signed-in user, and each user only ever sees and controls their own runs."""
+"""Every /runs endpoint needs a signed-in user, and each user only ever sees and controls their own runs.
+
+The HTTP routes answer 401 and 404; the run stream, a WebSocket, closes with 4401 and 4404 instead.
+"""
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -8,6 +11,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import Approval, Run, User
+from tests.integration.stream_client import open_stream, read_until_closed
 from tests.integration.test_approvals_api import proposal
 
 type MakeUser = Callable[..., Awaitable[User]]
@@ -17,7 +21,6 @@ RUN_ENDPOINTS = [
     ("POST", "/runs", {"goal": "Find late shipments"}),
     ("GET", "/runs", None),
     ("GET", "/runs/{run_id}", None),
-    ("GET", "/runs/{run_id}/stream", None),
     ("POST", "/runs/{run_id}/approve", {"approval_id": str(uuid4()), "decision": "approve"}),
     ("POST", "/runs/{run_id}/stop", None),
 ]
@@ -33,6 +36,17 @@ async def test_every_runs_endpoint_needs_sign_in(
             assert response.status_code == 401, (method, path, headers)
             assert response.json() == {"detail": "Not authenticated"}
             assert response.headers["www-authenticate"] == "Bearer"
+
+
+async def test_the_run_stream_needs_sign_in(
+    server: str, sessions: async_sessionmaker[AsyncSession], user: User
+) -> None:
+    run_id, _ = await proposal(sessions, user.id)
+    for headers in ({}, {"Authorization": "Bearer not-a-session"}):
+        async with open_stream(server, run_id, headers) as stream:
+            received = await read_until_closed(stream)
+        assert received.messages == [], headers  # not even "ready"
+        assert (received.close_code, received.close_reason) == (4401, "Not authenticated")
 
 
 async def test_creating_a_run_makes_the_caller_its_owner(
@@ -71,19 +85,27 @@ async def test_users_list_only_their_own_runs(
 
 
 async def test_another_users_run_looks_missing_on_every_run_route(
-    api_client: AsyncClient, make_user: MakeUser, auth_headers: AuthHeaders, sessions: async_sessionmaker[AsyncSession]
+    api_client: AsyncClient,
+    server: str,
+    make_user: MakeUser,
+    auth_headers: AuthHeaders,
+    sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     alex, sam = await make_user(email="alex@opspilot.test"), await make_user(email="sam@opspilot.test")
     alex_headers, sam_headers = await auth_headers(alex), await auth_headers(sam)
     run_id, approval_id = await proposal(sessions, alex.id)  # awaiting approval, with a pending proposal
     approve = {"approval_id": str(approval_id), "decision": "approve"}
 
-    for method, suffix, body in [("GET", "", None), ("GET", "/stream", None), ("POST", "/approve", approve)]:
+    for method, suffix, body in [("GET", "", None), ("POST", "/approve", approve)]:
         response = await api_client.request(method, f"/runs/{run_id}{suffix}", json=body, headers=sam_headers)
         assert response.status_code == 404
         assert response.json() == {"detail": "Run not found"}
     stop = await api_client.post(f"/runs/{run_id}/stop", headers=sam_headers)
     assert stop.status_code == 404 and stop.json() == {"detail": "Run not found"}
+    async with open_stream(server, run_id, sam_headers) as stream:
+        streamed = await read_until_closed(stream)
+    assert streamed.messages == []
+    assert (streamed.close_code, streamed.close_reason) == (4404, "Run not found")
 
     # Sam's attempts changed nothing; Alex can still see and decide the proposal.
     async with sessions() as session:
@@ -96,7 +118,7 @@ async def test_another_users_run_looks_missing_on_every_run_route(
 
 
 async def test_runs_without_an_owner_are_visible_to_nobody(
-    api_client: AsyncClient, sessions: async_sessionmaker[AsyncSession], user_headers: dict[str, str]
+    api_client: AsyncClient, server: str, sessions: async_sessionmaker[AsyncSession], user_headers: dict[str, str]
 ) -> None:
     legacy = Run(goal="Legacy", provider="fake", model="m", reference_time=datetime.now(UTC), business_timezone="UTC")
     async with sessions.begin() as session:
@@ -104,3 +126,5 @@ async def test_runs_without_an_owner_are_visible_to_nobody(
     response = await api_client.get(f"/runs/{legacy.id}", headers=user_headers)
     assert response.status_code == 404
     assert (await api_client.post(f"/runs/{legacy.id}/stop", headers=user_headers)).status_code == 404
+    async with open_stream(server, legacy.id, user_headers) as stream:
+        assert (await read_until_closed(stream)).close_code == 4404
