@@ -11,19 +11,20 @@ flowchart TD
   Browser(["Browser (holds only the HttpOnly session cookie)"])
 
   subgraph Frontend["Next.js 16 Console (Client & Server Components)"]
-    Gate["proxy.ts (optimistic cookie check)"]
+    Gate["proxy.ts (optimistic cookie check; forwards the stream's WebSocket handshake)"]
     SignIn["/login with signIn and signOut Server Actions"]
     Composer["Goal Composer"]
     Console["Run Console & State Reducer"]
     Timeline["Execution Timeline"]
     ApprovalUI["Human Approval Card"]
-    StreamClient["SSE ReadableStream Client"]
+    StreamClient["WebSocket stream client"]
     ApiProxy["Same-origin /api proxy (cookie to Bearer token)"]
   end
 
   subgraph API["FastAPI Backend (Async Endpoints)"]
     AuthRoutes["/auth Routes (login, logout, me)"]
-    Routes["/runs Routes (POST, GET, /stream, /approve, /stop), owner only"]
+    Routes["/runs Routes (POST, GET, /approve, /stop), owner only"]
+    StreamRoute["WebSocket /runs/:id/stream (checks after accepting)"]
     EventsService["Events & Sequence Broker"]
   end
 
@@ -99,13 +100,12 @@ flowchart TD
   QueueClaim -->|Resume approved tool batch| AgentLoop
   AgentLoop -->|Lock order & commit refund| RefundsTbl
 
-  StreamClient -->|GET /api/runs/:id/stream?after=N| ApiProxy
-  ApiProxy -->|GET /runs/:id/stream?after=N + Bearer| Routes
-  Routes -->|Read bounded committed events| EventsTbl
-  Routes -.->|Re-check the session at every wake-up| SessionsTbl
-  EventsService -.->|Wake-up hint after commit| Routes
-  Routes -->|SSE frames id, event, data| ApiProxy
-  ApiProxy -->|Unbuffered SSE frames| StreamClient
+  StreamClient -->|WebSocket /api/runs/:id/stream?after=N + cookie| Gate
+  Gate -->|Same origin and a session: handshake + Bearer| StreamRoute
+  StreamRoute -->|Read bounded committed events| EventsTbl
+  StreamRoute -.->|Re-check the session at every wake-up| SessionsTbl
+  EventsService -.->|Wake-up hint after commit| StreamRoute
+  StreamRoute -->|JSON text frames, piped by Next| StreamClient
   StreamClient -->|Deduplicate & reduce| Console
   Console --> Timeline & ApprovalUI
 ```
@@ -141,8 +141,8 @@ flowchart TD
 2. As the model produces tokens:
    - Early text is batched at $\approx 100\text{ms}$ or $4096$ characters to avoid excessive database writes.
    - Text chunks are appended to the assistant message in `messages` and committed with a `message.delta` event.
-   - PostgreSQL `after_commit` hook notifies active SSE stream subscribers.
-   - The browser's `GET /runs/{id}/stream` reader receives the SSE frame, deduplicates by sequence, and updates the live UI before the model finishes.
+   - PostgreSQL `after_commit` hook wakes the open run streams.
+   - The stream sends the event to the browser's WebSocket as one JSON text frame; the console deduplicates by sequence and updates the live UI before the model finishes.
 3. Tool calls requested by the model are persisted as `tool_calls` rows (`status = "requested"`) and emitted as `tool.requested` events.
 
 ### Step 4: Tool Execution & Human Approval Boundary
@@ -173,18 +173,19 @@ flowchart TD
    - Updates tool call status to `"completed"`.
    - Appends `tool.completed` and commits.
 5. The model receives the tool success observation and composes its final closing text.
-6. The run transitions to `completed`, appends `run.completed`, and the SSE stream closes cleanly.
+6. The run transitions to `completed`, appends `run.completed`, and the stream sends it, then closes the socket with `1000`.
 
 ---
 
 ## 3. Replay Protocol & Snapshot Consistency
 
-- Every `/runs/{id}` route (snapshot, stream, approve, stop) first checks that the caller owns the run. Another user's run, an ownerless run and a missing run all answer `404 Run not found`, so a run ID reveals nothing.
+- Every `/runs/{id}` route (snapshot, approve, stop) first checks that the caller owns the run, and the stream makes the same check after accepting its socket. Another user's run, an ownerless run and a missing run all answer `404 Run not found` (the stream closes with `4404`), so a run ID reveals nothing.
 - `GET /runs/{id}` reads the full trace under a shared read lock (`FOR UPDATE READ`), ensuring `snapshot_cursor` equals the exact sequence of the latest event included in the snapshot.
-- `GET /runs/{id}/stream?after=N` and `Last-Event-ID: N` stream only events with $\text{sequence} > N$.
-- If `Last-Event-ID` and `?after` are both provided, `Last-Event-ID` takes precedence.
-- If a client connects to a completed run with an already consumed cursor ($N \ge \text{latest\_sequence}$), the endpoint returns `204 No Content`.
-- The stream re-checks the caller's session each time it opens a database session (before every batch and after every 15-second keepalive wait) and ends once the session is revoked or expired; reconnecting with that token gets `401`.
+- The stream is a WebSocket at `/runs/{id}/stream?after=N`. It is accepted before it is checked, because a browser cannot read the HTTP status of a refused handshake (it only sees `1006`). Once the sign-in, owner and cursor checks pass, it sends `{"type": "stream.ready"}`, then only events with $\text{sequence} > N$, oldest first, then new ones as they commit, each as one JSON text frame, with `{"type": "stream.keepalive"}` after 15 s without events.
+- A malformed cursor, or one ahead of the run's latest sequence, closes with `4422`; the console then takes the server's snapshot.
+- If a client connects to a completed run with an already consumed cursor ($N \ge \text{latest\_sequence}$), the server closes the socket at once with `1000`, before `stream.ready`.
+- The stream re-checks the caller's session each time it opens a database session (before every batch and after every 15-second keepalive wait) and closes with `4401` once the session is revoked or expired; reconnecting with that token is closed with `4401` too.
+- The stream only sends: commands stay HTTP POSTs, and a message from the client closes the socket with `1008`. A second task listens for the client while events are sent, so a closed tab releases its subscription at once.
 - The frontend reducer ignores duplicate sequences and detects sequence gaps, reconciling with a fresh snapshot if a gap is ever observed.
 
 ---
@@ -214,9 +215,9 @@ The console is a backend-for-frontend: FastAPI issues the session token, and onl
    - The handler then checks the throttle: once 5 attempts for one email (`LOGIN_MAX_FAILURES`), or 50 across all emails, have failed within the window (`LOGIN_WINDOW_SECONDS`, 900 s), sign-in answers `429` with `Retry-After` and "Too many sign-in attempts. Try again in N minutes." The attempt is recorded as a failure *before* the password check, with no `await` in between, so a burst of parallel guesses cannot all slip past the limit; a correct password clears that email's failures.
    - The user is looked up in its own short transaction, then argon2id (argon2-cffi defaults: 3 passes, 64 MiB, 4 lanes, about 50 ms of CPU) runs in a worker thread, so no database connection waits on the hash and the event loop keeps serving streams. An unknown email is checked against a dummy hash, so it takes as long as a wrong password, and both get the same `401 Invalid email or password`.
    - On success the server stores a `user_sessions` row with the SHA-256 of a fresh `secrets.token_urlsafe(32)` token (256 bits) and an absolute expiry (`SESSION_TTL_HOURS`, 12 h), and returns the token, `expires_at` and the public user (id, email, display name), never a hash.
-2. **Every `/runs` request**: `get_current_user` hashes the bearer token and looks for a session that is neither revoked nor expired; anything else gets the same `401 Not authenticated` with `WWW-Authenticate: Bearer`. It is a dependency of the whole `/runs` router, so a run route added later cannot forget it. Health endpoints stay public, and `GET /auth/me` returns the signed-in user.
-3. **Ownership**: `POST /runs` sets `runs.user_id` to the caller, and `GET /runs` filters both the page and its total by owner. `require_run_owner` runs before `GET /runs/{id}`, `/approve`, `/stop` and `/stream` and answers `404` unless the caller owns the run; owners never change, so one check before the route is enough.
-4. **Sign-out (`POST /auth/logout`)**: sets `revoked_at` on the token's session and always answers `204`, so signing out twice is harmless. The Next.js action deletes the cookie even if that call fails, because the session still expires on its own. A stream opened with the token ends within one keepalive interval.
+2. **Every `/runs` request**: `get_current_user` hashes the bearer token and looks for a session that is neither revoked nor expired; anything else gets the same `401 Not authenticated` with `WWW-Authenticate: Bearer`. It is a dependency of the whole `/runs` router, so an HTTP run route added later cannot forget it; the stream's WebSocket checks the token itself (item 3). Health endpoints stay public, and `GET /auth/me` returns the signed-in user.
+3. **Ownership**: `POST /runs` sets `runs.user_id` to the caller, and `GET /runs` filters both the page and its total by owner. `require_run_owner` runs before `GET /runs/{id}`, `/approve` and `/stop` and answers `404` unless the caller owns the run; owners never change, so one check before the route is enough. The stream's WebSocket route (`app/runs/websocket.py`) sits on its own router, because the `/runs` router's sign-in dependency would refuse the handshake with a `401` the browser cannot read; it makes the same sign-in and owner checks after accepting, and closes with `4401` or `4404`.
+4. **Sign-out (`POST /auth/logout`)**: sets `revoked_at` on the token's session and always answers `204`, so signing out twice is harmless. The Next.js action deletes the cookie even if that call fails, because the session still expires on its own. A stream opened with the token closes with `4401` within one keepalive interval.
 5. **Demo accounts**: the seed creates Alex (`alex@opspilot.test`) and Sam (`sam@opspilot.test`) with `DEMO_USER_PASSWORD`, replaces a stored hash that no longer matches it or uses weaker argon2 settings, and gives every ownerless run to Alex. While the variable is empty it skips the accounts and says so.
 6. **Limits of this design**: the throttle lives in the memory of the single API process (`uvicorn --workers 1`), so it resets on restart and would need a shared store for several replicas; its global cap can pause sign-in for everyone during an attack. There is no sign-up, password reset or role model, and sessions have a fixed lifetime with no renewal.
 

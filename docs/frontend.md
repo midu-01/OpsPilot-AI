@@ -6,7 +6,7 @@ The console is a Next.js 16 App Router app (React 19, TypeScript, Tailwind CSS v
 
 ```text
 frontend/src
-├── proxy.ts                    Optimistic check: a page request without the session cookie goes to /login
+├── proxy.ts                    Forwards the run stream's WebSocket handshake; sends page requests without the session cookie to /login
 ├── app/                        Routes only. Pages and layouts are Server Components.
 │   ├── layout.tsx              <html>, theme cookie, skip link (no header: it depends on the session)
 │   ├── (console)/layout.tsx    Header with the signed-in user (GET /auth/me) around the console pages
@@ -39,24 +39,24 @@ flowchart LR
   Page["runs/[id]/page.tsx<br/>(Server)"] -->|"GET /runs/{id}"| Snapshot[(RunSnapshot)]
   Snapshot --> Hook["useRunStream<br/>(Client)"]
   Hook --> Reducer["reduceRunState<br/>lib/run-events.ts"]
-  Loop["runStreamLoop<br/>lib/run-stream-loop.ts"] -->|"GET /api/runs/{id}/stream?after=cursor"| Proxy["/api proxy"]
-  Proxy --> SSE["FastAPI SSE"]
+  Loop["runStreamLoop<br/>lib/run-stream-loop.ts"] -->|"WebSocket /api/runs/{id}/stream?after=cursor"| Proxy["proxy.ts"]
+  Proxy --> WS["FastAPI WebSocket"]
   Loop -->|"event (cursor + 1)"| Reducer
-  Loop -->|"gap, disconnect, 204, 422: fresh snapshot"| Reducer
+  Loop -->|"gap, disconnect, 1000, 4422: fresh snapshot"| Reducer
   Reducer --> VM["View models<br/>timeline · activity · run-metrics"]
   VM --> UI["Memoized components"]
 ```
 
 1. **Snapshot first.** `runs/[id]/page.tsx` calls `loadRun(id)` (server/data.ts), which fetches `GET /runs/{id}` from `API_INTERNAL_URL` with the user's bearer token. A 404 (no such run, or another user's run), or a 422 for a malformed ID, becomes `notFound()`. A 401 redirects to `/login?next=/runs/{id}`. An outage becomes a "backend unavailable, retry" state.
 2. **Client state.** `RunConsole` calls `useRunStream(snapshot)`: a `useReducer` over the pure reducer in `lib/run-events.ts`, started from that snapshot.
-3. **Stream from the cursor.** `runStreamLoop` opens `GET /api/runs/{id}/stream?after=<cursor>` with `Last-Event-ID`. Every event must be `cursor + 1`:
+3. **Stream from the cursor.** `runStreamLoop` opens a WebSocket to `/api/runs/{id}/stream?after=<cursor>`, and `lib/run-stream.ts` turns it into an async iterator of checked messages. The server first sends `stream.ready` (the badge shows "Live" from then on), then the events after the cursor, then new ones as they commit. Every event must be `cursor + 1`:
    - a duplicate is skipped;
    - a gap loads a fresh snapshot and reconnects from its cursor at once, if the snapshot moved the cursor forward; otherwise it is treated as a disconnect;
-   - a disconnect, a frame that does not parse, or a repeated `422` loads a snapshot and retries after 1, 2, 4, 8, then 15 seconds (the count resets only once an event gets through);
-   - `204` (finished and caught up) or a terminal event loads the final snapshot and stops;
-   - `422` (cursor ahead of the run) forces the server's snapshot;
-   - `401` (the session ended) stops the loop without retrying and sends the browser to sign in.
-   The loop is aborted when the component unmounts.
+   - a disconnect (close code `1006`), 45 s without any message (three missed keepalives: a dead network can otherwise look like a quiet run), a message that does not parse, or a repeated `4422` loads a snapshot and retries after 1, 2, 4, 8, then 15 seconds (the count resets only once an event gets through);
+   - a `1000` close (the run finished and its last event is in) loads the final snapshot and stops;
+   - `4422` (cursor ahead of the run) forces the server's snapshot;
+   - `4401` (the session ended) stops the loop without retrying and sends the browser to sign in.
+   The loop is aborted when the component unmounts, which closes the socket.
 4. **Reducer.** Pure: same input, same output. It replaces only the objects that change, so a text delta creates one new message object and every other turn keeps its identity. A snapshot replaces the state only when it knows more: newer events, or the final numbers of a finished run. An equal snapshot mid-run only refreshes `model_calls`; an older one is ignored.
 5. **View models.** `buildTimeline` (trace order), `describeActivity` (the "now" line) and `budgetItems` (meters) are pure functions with unit tests.
 6. **Components.** `TurnItem` and `ToolCallCard` are memoized; during streaming a delta re-renders only its own turn.
@@ -81,13 +81,15 @@ sequenceDiagram
   N->>N: proxy.ts: cookie present?
   N->>F: GET /auth/me, GET /runs (Authorization: Bearer token)
   F-->>N: user, runs of this user
-  B->>N: fetch /api/runs/{id}/stream (cookie)
-  N->>F: same path, Authorization: Bearer token
+  B->>N: WebSocket handshake /api/runs/{id}/stream (cookie)
+  N->>N: proxy.ts: same Origin? session cookie?
+  N->>F: same handshake, Authorization: Bearer token, no cookies
+  F-->>B: 101, then stream.ready and events (Next pipes the socket)
 ```
 
 1. **Sign in.** `/login` renders `LoginForm`, a `<form>` bound to the `signIn` Server Action with `useActionState`, so it also works before JavaScript loads. The action checks the fields, calls `POST /auth/login`, stores the token in the `opspilot_session` cookie (`HttpOnly`, `SameSite=Lax`, `Path=/`, `Max-Age` until the backend session expires, `Secure` when the request came over HTTPS) and redirects to `next`. Errors come back as state: a `role="alert"` message that takes keyboard focus. `next` always goes through `safeNextPath` (`lib/auth.ts`), which only accepts a path on this site and never `/login`, so `//evil.com`, `/\evil.com`, `https://…`, `javascript:` and encoded variants fall back to `/`. It also refuses any path the URL parser would change: dot segments (`/.//evil.com` resolves to `//evil.com`) and raw non-ASCII characters (Next writes the redirect into a header, which must be ASCII). The paths the console builds are already in that form.
 2. **Pages.** `proxy.ts` redirects page requests without the cookie to `/login?next=<path>` before anything renders. It is only an optimistic check: it reads the cookie and makes no backend call. The real check is FastAPI's. Server code turns the cookie into `Authorization: Bearer <token>` (`server/session.ts`): the console layout (`app/(console)/layout.tsx`) calls `getCurrentUser()` (`GET /auth/me`) for the header, and the loaders send the token. A 401 from a loader becomes `{ kind: "signed-out" }`, and the page redirects to sign in.
-3. **Browser calls.** `/api/*` (`app/api/[...path]/route.ts` reads the cookie with Next's parser, `lib/api-proxy.ts` forwards) sends the token as a bearer header. There is no browser-side API override: only this proxy can add the token. It drops any `Authorization` header the browser sent. Without a cookie it answers 401 without calling the backend. Health checks stay public.
+3. **Browser calls.** `/api/*` (`app/api/[...path]/route.ts` reads the cookie with Next's parser, `lib/api-proxy.ts` forwards) sends the token as a bearer header. There is no browser-side API override: only this proxy can add the token. It drops any `Authorization` header the browser sent. Without a cookie it answers 401 without calling the backend. Health checks stay public. The stream's WebSocket takes another road: a route handler cannot accept an upgrade, but Next runs `proxy.ts` for upgrade requests too. `lib/stream-proxy.ts` decides there: a same-origin handshake with a session is rewritten to FastAPI with the bearer token and only the handshake headers, and Next pipes the socket; anything else is passed on (`NextResponse.next()`), and Next closes the socket. Returning a Response with a status instead would leave the socket hanging.
 4. **Sign out.** The header's user menu posts to the `signOut` Server Action: `POST /auth/logout` revokes the token, then the cookie is deleted and the browser goes to `/login`. The menu (without a name) and its Sign out also appear when `GET /auth/me` fails: then only the cookie is deleted, and the backend session expires on its own.
 5. **Stale cookies.** An expired or revoked cookie passes `proxy.ts`, but `/auth/me` and the loaders answer 401. `/login` decides with `getCurrentUser()`, not with the cookie, so it shows the form instead of bouncing back. There is no redirect loop (`tests/auth.spec.ts` puts a revoked cookie back and checks).
 6. **Why the header is not in the root layout.** Next keeps a layout across client-side navigations, and a page's `redirect()` during one is handled as a client-side navigation too. The header therefore lives in `app/(console)/layout.tsx` and `app/login/layout.tsx`: going to or from `/login` always swaps the layout, so the header is rendered again for the new session state.
@@ -98,7 +100,7 @@ Another user's run answers 404, exactly like a run that does not exist, so a run
 
 | Part | Kind | Why |
 | --- | --- | --- |
-| `proxy.ts` | Server (before routing) | Redirects page loads without a session cookie to `/login`. Cookie check only, no backend call. |
+| `proxy.ts` | Server (before routing) | Redirects page loads without a session cookie to `/login` (cookie check only, no backend call), and forwards the run stream's WebSocket handshake to FastAPI. |
 | `app/layout.tsx` | Server | Reads the theme cookie and renders `<html data-theme>`, so the first byte has the right theme without an inline script. |
 | `app/(console)/layout.tsx`, `app/login/layout.tsx` | Server | The header (`PageShell`) and `<main>`. The console layout calls `getCurrentUser()`; the sign-in layout always shows the signed-out header. |
 | `app/login/actions.ts` | Server (Server Actions) | `signIn` and `signOut`. The token goes from FastAPI into the HttpOnly cookie and never reaches browser JavaScript. |
@@ -111,7 +113,7 @@ Another user's run answers 404, exactly like a run that does not exist, so a run
 
 `/runs` refreshes itself with `router.refresh()` every 4 s while any listed run is unfinished, pauses in hidden tabs and stops once every run has finished.
 
-**Security at the boundary.** The browser only talks to `/api/*`. The proxy (`lib/api-proxy.ts`) allowlists backend paths (not `/auth`), forwards only `accept`, `content-type` and `last-event-id`, adds `Authorization: Bearer <token>` from the session cookie (never the browser's own `Authorization` or `Cookie`), answers 401 without a session, refuses writes whose `Origin` is not the console's own host, and caps request bodies at 64 KB. Cross-site requests are blocked twice: `SameSite=Lax` keeps the cookie off other sites' POSTs, and both the proxy and Next's Server Actions compare `Origin` with the host. Run IDs are checked as UUIDs before any request. Model output is rendered with `react-markdown` (no raw HTML, no images, http/https/mailto links only); there is no `dangerouslySetInnerHTML` in the app. `next.config.ts` sends `frame-ancestors 'none'`, `nosniff` and related headers.
+**Security at the boundary.** The browser only talks to `/api/*`. The proxy (`lib/api-proxy.ts`) allowlists backend paths (not `/auth`), forwards only `accept` and `content-type`, adds `Authorization: Bearer <token>` from the session cookie (never the browser's own `Authorization` or `Cookie`), answers 401 without a session, refuses writes whose `Origin` is not the console's own host, and caps request bodies at 64 KB. Cross-site requests are blocked twice: `SameSite=Lax` keeps the cookie off other sites' POSTs, and both the proxy and Next's Server Actions compare `Origin` with the host. The stream's handshake gets the same `Origin` check in `proxy.ts`: WebSockets are not covered by CORS, so this is what stops cross-site WebSocket hijacking (a page on another port of the same host is same-site, so `SameSite` alone would let the cookie through). Run IDs are checked as UUIDs before any request. Model output is rendered with `react-markdown` (no raw HTML, no images, http/https/mailto links only); there is no `dangerouslySetInnerHTML` in the app. `next.config.ts` sends `frame-ancestors 'none'`, `nosniff` and related headers.
 
 ## How to add a tool view
 
@@ -165,7 +167,7 @@ pnpm test:coverage          # coverage of src/lib
 E2E_EXTERNAL_STACK=1 pnpm exec playwright test
 ```
 
-Playwright's `setup` project (`tests/auth.setup.ts`) signs in Alex and Sam through the form and saves their cookies under `tests/.auth/` (git-ignored). Specs run as Alex by default; `tests/auth.spec.ts` (which also uses signed-out and Sam's browsers) covers the signed-out redirect, a wrong password, sign-out, per-user runs and axe on `/login`. The password is `E2E_DEMO_PASSWORD`, default `opspilot-demo`.
+Playwright's `setup` project (`tests/auth.setup.ts`) signs in Alex and Sam through the form and saves their cookies under `tests/.auth/` (git-ignored). Specs run as Alex by default; `tests/live-stream.spec.ts` checks the WebSocket itself and the refusal of a handshake from another origin or without a session; `tests/auth.spec.ts` (which also uses signed-out and Sam's browsers) covers the signed-out redirect, a wrong password, sign-out, per-user runs and axe on `/login`. The password is `E2E_DEMO_PASSWORD`, default `opspilot-demo`.
 
 ## Known trade-offs
 
@@ -173,7 +175,8 @@ Playwright's `setup` project (`tests/auth.setup.ts`) signs in Alex and Sam throu
 - Per-call model usage only arrives in snapshots. The Model calls tab reloads the snapshot when it opens during a live run.
 - Active time ticks locally from the server's last checkpoint and is corrected by every snapshot. A client clock behind the server can delay it slightly but never makes it negative.
 - The offline `fake` model sends each answer in one chunk, so the streaming caret is only visible with a real model.
-- The `/api` proxy starts every stream with an SSE comment (`: connected`). Node sends headers only with the first body chunk, and a caught-up backend stream stays quiet until its 15-second keepalive.
+- The stream depends on Next running `proxy.ts` for WebSocket upgrades and piping a rewritten upgrade to its target, which Next's docs do not promise (route handlers cannot accept upgrades at all). It works on the pinned Next 16.4.6, in dev and in the standalone build, and `tests/live-stream.spec.ts` fails if a newer Next version changes it.
+- A handshake that `proxy.ts` refuses (another origin, no session cookie) reaches the browser as a bare `1006`. The loop treats it as a disconnect: the snapshot reload answers 401, which sends the user to sign in.
 - There is no full Content-Security-Policy yet: Next's inline scripts would need a per-request nonce (set in `proxy.ts`). Only `frame-ancestors` is enforced today.
 - The console layout waits for `GET /auth/me` before it streams, about one local round trip per page load. The header needs the user, and `cache()` shares the call with the page.
 - `proxy.ts` cannot tell a stale cookie from a valid one (the token is opaque, and checking it would cost a backend call on every request). Pages catch stale cookies with a 401, and the cookie stays until the next sign-in or sign-out. Its `Max-Age` already ends it with the backend session.
