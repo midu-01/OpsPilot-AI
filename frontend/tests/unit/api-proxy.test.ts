@@ -49,47 +49,6 @@ test("the proxy forwards goal creation with the session cookie as the bearer tok
   assert.equal((await response.json()).id, RUN_ID);
 });
 
-test("SSE frames pass through incrementally with replay cursors", async (t) => {
-  internalApi(t);
-  const encoder = new TextEncoder();
-  let controller: ReadableStreamDefaultController<Uint8Array>;
-  const upstream = new ReadableStream<Uint8Array>({
-    start(stream) {
-      controller = stream;
-      stream.enqueue(encoder.encode('id: 12\nevent: message.delta\ndata: {"sequence":12}\n\n'));
-    },
-  });
-  let sentUrl = "";
-  let sentCursor = "";
-  t.mock.method(globalThis, "fetch", async (url: URL, options: RequestInit) => {
-    sentUrl = String(url);
-    sentCursor = new Headers(options.headers).get("Last-Event-ID") || "";
-    return new Response(upstream, { headers: { "content-type": "text/event-stream" } });
-  });
-
-  const timeout = setTimeout(() => controller.error(new Error("SSE was buffered")), 1000);
-  t.after(() => clearTimeout(timeout));
-  const response = await forwardApiRequest(signedIn(`http://frontend:3000/api/runs/${RUN_ID}/stream?after=11`, {
-    headers: { "Last-Event-ID": "11" },
-  }), ["runs", RUN_ID, "stream"], TOKEN);
-  assert.equal(response.status, 200);
-  assert.ok(response.body, "The proxy must return the incremental response body");
-  const reader = response.body.getReader();
-
-  assert.equal(sentUrl, `http://backend:8000/runs/${RUN_ID}/stream?after=11`);
-  assert.equal(sentCursor, "11");
-  assert.match(response.headers.get("content-type")!, /text\/event-stream/);
-  assert.equal(response.headers.get("x-accel-buffering"), "no");
-  // The proxy opens with an SSE comment so headers reach the browser before the first event.
-  assert.equal(new TextDecoder().decode((await reader.read()).value), ": connected\n\n");
-  assert.match(new TextDecoder().decode((await reader.read()).value), /id: 12\nevent: message.delta/);
-
-  controller!.enqueue(encoder.encode('id: 13\nevent: run.completed\ndata: {"sequence":13}\n\n'));
-  controller!.close();
-  assert.match(new TextDecoder().decode((await reader.read()).value), /event: run.completed/);
-  assert.equal((await reader.read()).done, true);
-});
-
 for (const status of [204, 404, 409, 422, 500]) {
   test(`backend status ${status} is preserved`, async (t) => {
     internalApi(t);
@@ -103,6 +62,18 @@ for (const status of [204, 404, 409, 422, 500]) {
     assert.equal(await response.text(), status === 204 ? "" : "Backend response");
   });
 }
+
+test("a plain GET of the run stream answers 426: it is a WebSocket, which proxy.ts forwards", async (t) => {
+  internalApi(t);
+  const fetchMock = t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  for (const token of [TOKEN, null]) {
+    const response = await forwardApiRequest(signedIn(`http://console:3000/api/runs/${RUN_ID}/stream?after=3`), ["runs", RUN_ID, "stream"], token);
+    assert.equal(response.status, 426);
+    assert.equal(response.headers.get("upgrade"), "websocket");
+    assert.match((await response.json()).detail, /WebSocket/);
+  }
+  assert.equal(fetchMock.mock.callCount(), 0);
+});
 
 test("an unreachable backend becomes a safe actionable 502 response", async (t) => {
   internalApi(t);
@@ -124,26 +95,6 @@ test("the proxy does not forward arbitrary or traversal paths", async (t) => {
     const response = await forwardApiRequest(new Request("http://frontend:3000/api/unknown"), path, null);
     assert.equal(response.status, 404);
   }
-});
-
-test("a stream response that is not 200 is passed through untouched", async (t) => {
-  internalApi(t);
-  t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 204 }));
-  const response = await forwardApiRequest(signedIn(`http://frontend:3000/api/runs/${RUN_ID}/stream?after=9`), ["runs", RUN_ID, "stream"], TOKEN);
-  assert.equal(response.status, 204);
-  assert.equal(await response.text(), "");
-});
-
-test("closing the browser stream cancels the backend stream", async (t) => {
-  internalApi(t);
-  let cancelled = false;
-  const upstream = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
-  t.mock.method(globalThis, "fetch", async () => new Response(upstream, { headers: { "content-type": "text/event-stream" } }));
-  const response = await forwardApiRequest(signedIn(`http://frontend:3000/api/runs/${RUN_ID}/stream`), ["runs", RUN_ID, "stream"], TOKEN);
-  const reader = response.body!.getReader();
-  await reader.read(); // the opening comment
-  await reader.cancel();
-  assert.equal(cancelled, true);
 });
 
 test("writes from another origin are refused before reaching the backend", async (t) => {
@@ -187,7 +138,6 @@ for (const [method, path] of [
   ["GET", ["runs"]],
   ["POST", ["runs"]],
   ["GET", ["runs", RUN_ID]],
-  ["GET", ["runs", RUN_ID, "stream"]],
   ["POST", ["runs", RUN_ID, "approve"]],
   ["POST", ["runs", RUN_ID, "stop"]],
 ] as const) {
@@ -238,7 +188,7 @@ test("unknown paths stay 404 and cross-origin writes stay 403 whether or not a s
 test("a backend 401 (expired or revoked session) is passed through to the browser", async (t) => {
   internalApi(t);
   t.mock.method(globalThis, "fetch", async () => Response.json({ detail: "Not authenticated" }, { status: 401 }));
-  const response = await forwardApiRequest(signedIn(`http://console:3000/api/runs/${RUN_ID}/stream`), ["runs", RUN_ID, "stream"], TOKEN);
+  const response = await forwardApiRequest(signedIn(`http://console:3000/api/runs/${RUN_ID}`), ["runs", RUN_ID], TOKEN);
   assert.equal(response.status, 401);
   assert.deepEqual(await response.json(), { detail: "Not authenticated" });
 });
