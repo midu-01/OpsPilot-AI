@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { loginPath, readSessionToken, SESSION_COOKIE } from "@/lib/auth";
-import { isRunStreamPath, routeRunStream } from "@/lib/stream-proxy";
+import { routeRunStream } from "@/lib/stream-proxy";
 
 /**
  * Two jobs, both before Next routes the request:
@@ -19,7 +19,9 @@ export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
   const token = readSessionToken(request.cookies.get(SESSION_COOKIE)?.value);
 
-  if (isRunStreamPath(pathname)) {
+  // The matcher lets only /api/runs/:id/stream into /api, and it is never redirected: a
+  // redirect answered to an upgrade would leave the socket hanging.
+  if (pathname.startsWith("/api/")) {
     const route = routeRunStream(request, token);
     // Refusing means passing the request on: Next closes an upgrade that reaches the /api
     // route, and that route answers a plain GET with 426.

@@ -50,9 +50,10 @@ function sessionCookie(): string {
 
 /**
  * A WebSocket handshake sent by hand, with headers a page could never forge. Resolves with the
- * HTTP status (101 once upgraded), or "refused" when the console closed the connection.
+ * HTTP status (101 once upgraded), "refused" when the console closed the connection, or "hung"
+ * when nothing came back for 5 s: a socket left open with no answer.
  */
-function handshake(url: URL, headers: Record<string, string>): Promise<number | "refused"> {
+function handshake(url: URL, headers: Record<string, string>): Promise<number | "refused" | "hung"> {
   return new Promise((resolve) => {
     const request = http.request(url, {
       headers: {
@@ -63,7 +64,10 @@ function handshake(url: URL, headers: Record<string, string>): Promise<number | 
         ...headers,
       },
     });
-    request.setTimeout(10_000, () => request.destroy());
+    request.setTimeout(5_000, () => {
+      resolve("hung");
+      request.destroy();
+    });
     request.on("upgrade", (response, socket) => {
       socket.destroy();
       resolve(response.statusCode ?? 0);
@@ -87,6 +91,8 @@ test("the console refuses a stream handshake from another origin or without a se
   // Cross-site WebSocket hijacking: another site's page, with the user's cookie attached.
   expect(await handshake(url, { Origin: "https://evil.example", Cookie: cookie })).toBe("refused");
   expect(await handshake(url, { Origin: ownOrigin })).toBe("refused");
+  // A path the console never sends gets an answer too, not a socket left open.
+  expect(await handshake(new URL("/api/runs/not-a-run/stream", baseURL), { Origin: ownOrigin })).toBe("refused");
 
   await stopRun(page);
 });

@@ -30,10 +30,6 @@ export type StreamRoute =
 
 const REFUSE: StreamRoute = { action: "refuse" };
 
-export function isRunStreamPath(pathname: string): boolean {
-  return RUN_STREAM_PATH.test(pathname);
-}
-
 function isWebSocketHandshake(request: Request): boolean {
   return request.method === "GET" && request.headers.get("upgrade")?.toLowerCase() === "websocket";
 }

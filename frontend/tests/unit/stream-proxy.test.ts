@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { isRunStreamPath, routeRunStream } from "../../src/lib/stream-proxy.ts";
+import { routeRunStream } from "../../src/lib/stream-proxy.ts";
 
 const RUN_ID = "01234567-89ab-4cde-8fab-0123456789ab";
 const TOKEN = "q3J6bF9xV0t1d2pQbm5LZ2J6U0lGZk1fQ3pYc0dRbE0";
@@ -83,15 +83,11 @@ test("only a WebSocket handshake for a run's stream is forwarded", (t) => {
   internalApi(t);
   const plainGet = new Request(`http://console:3000/api/runs/${RUN_ID}/stream`, { headers: { host: "console:3000" } });
   assert.equal(routeRunStream(plainGet, TOKEN).action, "refuse"); // the /api route answers it with 426
-  for (const path of ["/api/runs/not-a-uuid/stream", `/api/runs/${RUN_ID}`, `/api/runs/${RUN_ID}/stream/extra`, "/api/health/ready"]) {
+  const paths = [
+    "/api/runs/not-a-uuid/stream", `/api/runs/${RUN_ID}`, `/api/runs/${RUN_ID}/stream/`, `/api/runs/${RUN_ID}/stream/extra`,
+    "/api/runs/../stream", "/api/health/ready",
+  ];
+  for (const path of paths) {
     assert.equal(routeRunStream(handshake(path), TOKEN).action, "refuse", path);
-  }
-});
-
-test("isRunStreamPath matches exactly the stream of one run", () => {
-  assert.equal(isRunStreamPath(`/api/runs/${RUN_ID}/stream`), true);
-  assert.equal(isRunStreamPath(`/api/runs/${RUN_ID.toUpperCase()}/stream`), true);
-  for (const path of [`/api/runs/${RUN_ID}`, `/runs/${RUN_ID}/stream`, `/api/runs/${RUN_ID}/stream/`, "/api/runs/../stream"]) {
-    assert.equal(isRunStreamPath(path), false, path);
   }
 });
